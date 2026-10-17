@@ -1,5 +1,5 @@
 //! Micro-benchmark: how long does the `powerpc` crate take to decode the ROM?
-//! cargo run --release -p ppc8xx --example decode_bench -- ../CISCO_bootrom_AT27C040.bin
+//! cargo run --release -p ppc8xx --example decode_bench -- ../roms/CISCO_bootrom_AT27C040.bin
 use powerpc::{Extensions, Ins, Opcode};
 use std::time::Instant;
 

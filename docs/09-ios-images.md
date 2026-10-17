@@ -15,7 +15,7 @@ The "MIPS-X" label is an artefact of how Cisco uses the ELF header.
 Reproduce with:
 
 ```bash
-python3 -I tools/ciscoimg.py c1700-k9o3sy7-mz.123-11.T2.bin [--extract ios.elf]
+python3 -I tools/ciscoimg.py roms/c1700-k9o3sy7-mz.123-11.T2.bin [--extract ios.elf]
 ```
 
 ## 9.1 Why `file` says MIPS-X
@@ -132,7 +132,7 @@ The strongest check is to let the real boot ROM load the real image. In the
 emulator (64 MB RAM), with the ROMMON variables set as in chapter 8:
 
 ```bash
-mkdir ios && ln -s $PWD/c1700-k9o3sy7-mz.123-11.T2.bin ios/ios.bin
+mkdir ios && ln -s $PWD/roms/c1700-k9o3sy7-mz.123-11.T2.bin ios/ios.bin
 emu/target/release/c1700emu --confreg 0x2100 --ram 64 --tftp-root ios
 rommon 6 > tftpdnld -r          # with TFTP_FILE=ios.bin
 ```

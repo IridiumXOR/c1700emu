@@ -132,7 +132,7 @@ and jumps to the entry point. A `-mz` image then decompresses itself.
 
 ```bash
 emu/target/release/c1700emu --model 1760 --ram 128 --confreg 0x2102 \
-    --flash fl1760.bin --flash-file c1700-adventerprisek9-mz.124-8.bin
+    --flash fl1760.bin --flash-file roms/c1700-adventerprisek9-mz.124-8.bin
 ```
 
 * `--flash-file FILE` (repeatable) **replaces** the flash content with a

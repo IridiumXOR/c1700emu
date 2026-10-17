@@ -28,7 +28,12 @@ chapter with the full story.
 
 ## 2. Quick start
 
+The Cisco files (boot ROM, IDA database, IOS images) are proprietary, so
+they live in a separate private repository, cloned as `roms/`:
+
 ```bash
+git clone git@github.com:IridiumXOR/c1700emu.git && cd c1700emu
+git clone git@github.com:IridiumXOR/c1700emu-roms.git roms
 cd emu && cargo build --release && cd ..
 emu/target/release/c1700emu --confreg 0x2100      # 0x2100 = stay in ROMMON
 ```
@@ -84,7 +89,7 @@ Details: [chapter 8](08-network-and-flash.md).
 
 ```bash
 emu/target/release/c1700emu --model 1760 --ram 128 --confreg 0x2102 \
-    --flash fl1760.bin --flash-file c1700-adventerprisek9-mz.124-8.bin
+    --flash fl1760.bin --flash-file roms/c1700-adventerprisek9-mz.124-8.bin
 ```
 
 `--flash-file` writes a Cisco flash file system with the image (saved to
@@ -237,8 +242,8 @@ Run everything with `cd emu && cargo test --release` (about 30 s).
 | `tools/mkimage.py` | builds a minimal bootable C1700 image that prints a message |
 | `tools/ciscoimg.py` | checks a real IOS image like the ROM does (header, trailer, checksums), unzips it, identifies the CPU ([chapter 9](09-ios-images.md)) |
 
-The annotated database is `CISCO_bootrom_AT27C040.bin.i64`; a backup of
-the previous version is in `CISCO_bootrom_AT27C040.bin.i64.bak`.
+The annotated database is `roms/CISCO_bootrom_AT27C040.bin.i64` (in the
+private `c1700emu-roms` repository, see §2).
 
 ## 9. Next steps
 

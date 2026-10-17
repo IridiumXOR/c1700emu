@@ -3,7 +3,7 @@
 Inspect a Cisco C1700 IOS image the way the C1700 boot ROM does, and find
 out which CPU the code is really for.
 
-    python3 -I tools/ciscoimg.py c1700-k9o3sy7-mz.123-11.T2.bin [--extract OUT]
+    python3 -I tools/ciscoimg.py roms/c1700-k9o3sy7-mz.123-11.T2.bin [--extract OUT]
 
 Checks (see docs/09-ios-images.md):
   1. ELF header + ROMMON's own acceptance rules (image_header_check, 0xFFF18878),

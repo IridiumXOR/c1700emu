@@ -19,7 +19,8 @@ open_database(path=".../CISCO_bootrom_AT27C040.bin",
                             "image_base": 0xFFF00000, "entry_point": 0xFFF00100})
 ```
 
-The resulting database is `CISCO_bootrom_AT27C040.bin.i64` next to the ROM.
+The resulting database is `CISCO_bootrom_AT27C040.bin.i64` next to the ROM
+(`roms/`, the private companion repository).
 
 ## 2.2 Annotation scripts (reproducible)
 
@@ -81,11 +82,11 @@ When the IDA MCP server was unavailable, I used **idalib** (IDA as a Python
 library, from IDA's own virtualenv) directly:
 
 ```bash
-cp CISCO_bootrom_AT27C040.bin.i64 /tmp/copy.i64          # don't touch the real one
+cp roms/CISCO_bootrom_AT27C040.bin.i64 /tmp/copy.i64          # don't touch the real one
 ~/.idapro/venv/bin/python tools/ida/decompile.py /tmp/copy.i64 0xFFF1EF1C   # pseudocode
 ~/.idapro/venv/bin/python tools/ida/decompile.py /tmp/copy.i64 --disasm 0xFFF1E4A0
 # apply the scripts to the real database (only while nothing else has it open):
-~/.idapro/venv/bin/python tools/ida/decompile.py CISCO_bootrom_AT27C040.bin.i64 \
+~/.idapro/venv/bin/python tools/ida/decompile.py roms/CISCO_bootrom_AT27C040.bin.i64 \
     --script tools/ida/mpc860_setup.py --script tools/ida/c1700_names.py --save
 ```
 

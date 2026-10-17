@@ -7,7 +7,7 @@
 //! c1700emu --confreg 0x8000             # verbose diagnostic boot messages
 //! c1700emu --tcp 2323                   # also: telnet localhost 2323
 //! c1700emu --gdb 1234                   # wait for GDB before the first instruction
-//! c1700emu --model 1760 --ram 128 --flash-file c1700-adventerprisek9-mz.124-8.bin --confreg 0x2102
+//! c1700emu --model 1760 --ram 128 --flash-file roms/c1700-adventerprisek9-mz.124-8.bin --confreg 0x2102
 //!                                        # IOS in the internal flash, ROMMON boots it
 //! c1700emu --trace --log trace.txt -n 2000000   # instruction trace of the first 2M instructions
 //! ```
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 #[command(version, about = "Emulator for the Cisco C1700 (MPC860T) System Bootstrap ROM")]
 struct Args {
     /// Boot ROM image (512 KB AT27C040 dump).
-    #[arg(long, default_value = "CISCO_bootrom_AT27C040.bin")]
+    #[arg(long, default_value = "roms/CISCO_bootrom_AT27C040.bin")]
     rom: PathBuf,
 
     /// NVRAM image file (created if missing, saved on exit).

@@ -24,7 +24,7 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 
 | Option | Meaning |
 |--------|---------|
-| `--rom PATH` | ROM image (default `CISCO_bootrom_AT27C040.bin`) |
+| `--rom PATH` | ROM image (default `roms/CISCO_bootrom_AT27C040.bin`) |
 | `--nvram PATH` | NVRAM file, created if missing, saved every 2 s and on exit |
 | `--flash PATH` | flash image file (default `c1700-flash.bin`): loaded at start, guest writes saved back |
 | `--model M` | chassis 1720 (default), 1721, 1750, 1751, 1760: sets the cookie's mainboard PM ID (chapter 11) |

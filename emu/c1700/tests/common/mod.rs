@@ -6,7 +6,7 @@ use c1700emu::board::{BoardConfig, cookie, nvram::Nvram};
 use c1700emu::machine::Machine;
 use std::path::Path;
 
-pub const ROM: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../CISCO_bootrom_AT27C040.bin");
+pub const ROM: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../roms/CISCO_bootrom_AT27C040.bin");
 
 pub fn rom_available() -> bool {
     if Path::new(ROM).exists() {

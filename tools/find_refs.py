@@ -1,6 +1,6 @@
 """Find code that builds a given address with `lis rX,hi` + `addi/ori/lwz/... lo(rX)`.
 
-    python3 tools/find_refs.py CISCO_bootrom_AT27C040.bin 0xFFF2A641 [...]
+    python3 tools/find_refs.py roms/CISCO_bootrom_AT27C040.bin 0xFFF2A641 [...]
 
 IDA doesn't create cross-references for pointers built at run time this way,
 so this is how strings (and therefore the code printing them) were located.
