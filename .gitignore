@@ -1,10 +1,13 @@
-# Only docs/ and emu/ belong to the repository. Everything else in this
-# directory stays local: the boot ROM dump, IOS images, manuals and
-# datasheets, IDA databases, the Dynamips reference clone, the Python venv.
+# Only docs/, emu/, tools/ and the reference PDFs belong to the repository.
+# Everything else in this directory stays local: the boot ROM dump, IOS
+# images, IDA databases, the Dynamips reference clone, the Python venv.
 /*
 !/.gitignore
 !/docs/
 !/emu/
+!/tools/
+!/*.pdf
+!/*.PDF
 
 # Rust build output
 target/
@@ -13,6 +16,10 @@ target/
 c1700-nvram.bin
 c1700-flash.bin
 *.log
+
+# Python
+__pycache__/
+*.pyc
 
 # Editors and OS
 *.swp
