@@ -166,6 +166,20 @@ the ROM takes the interrupt, comes back, and the rest is skipped). Virtual
 time is unchanged; wall time for the flash write dropped from ~70 s to ~4 s,
 and the boot from 6.9 s to 5.2 s. `--no-fast-forward` turns it off.
 
+*Correction (chapter 15.8):* "virtual time is unchanged" was a claim, not a
+measurement. A test that boots with and without the fast-forward and
+compares everything at the same instruction (`rom_accelerators_are_exact`)
+found three precision bugs, now fixed:
+* it skipped *onto* the decrementer's tick instead of stopping one before;
+* it skipped while an interrupt was already pending, losing 10 of 116 timer
+  interrupts during boot;
+* a skip of the 3-instruction `delay_ms` loop wasn't a whole number of
+  iterations.
+
+The same file now also replaces the ROM's byte-by-byte memory clear with a
+bulk fill: the ROMMON boot dropped from 8 s to 0.1 s (32 MB) and from 26 s
+to 0.2 s (128 MB).
+
 ## 8.7 Try it
 
 ```bash

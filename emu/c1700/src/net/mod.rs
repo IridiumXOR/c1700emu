@@ -117,7 +117,13 @@ pub struct VirtualNetwork {
     sockets: SocketSet<'static>,
     tftp: TftpServer,
     pub config: NetConfig,
+    /// Virtual time of the next housekeeping poll when nothing happens.
+    next_idle_poll_us: u64,
 }
+
+/// Housekeeping poll period while the network is quiet (20 ms virtual).
+/// Polling smoltcp every 4096 cycles regardless cost ~7% of host time.
+const IDLE_POLL_US: u64 = 20_000;
 
 impl VirtualNetwork {
     pub fn new(config: NetConfig) -> Self {
@@ -138,7 +144,7 @@ impl VirtualNetwork {
             config.prefix_len,
             config.tftp_root
         );
-        VirtualNetwork { cable, iface, sockets, tftp, config }
+        VirtualNetwork { cable, iface, sockets, tftp, config, next_idle_poll_us: 0 }
     }
 
     /// A frame the guest put on the wire (without FCS).
@@ -161,9 +167,16 @@ impl VirtualNetwork {
         Some(f)
     }
 
+    /// Is a poll useful now? Frames from the guest, a running TFTP
+    /// transfer, or the periodic housekeeping.
+    pub fn wants_poll(&self, now_us: u64) -> bool {
+        !self.cable.from_guest.is_empty() || self.tftp.busy() || now_us >= self.next_idle_poll_us
+    }
+
     /// Let the virtual host process what the guest sent and run its timers.
     /// `now_us` is the emulator's virtual time in microseconds.
     pub fn poll(&mut self, now_us: u64) {
+        self.next_idle_poll_us = now_us + IDLE_POLL_US;
         let now = Instant::from_micros(now_us as i64);
         self.iface.poll(now, &mut self.cable, &mut self.sockets);
         if self.tftp.service(&mut self.sockets, now) {

@@ -150,3 +150,55 @@ With the idle loop gone, the boot is dominated by:
 And on the host side, ~30% of the time finding memory, mostly for
 instruction fetch. These numbers are the input for the JIT decision
 (chapter 14).
+
+## 15.8 Steps 1 and 2: ROM accelerator and interpreter fast paths
+
+Benchmark: power-on to 3 billion instructions with the IOS image in flash
+(ROMMON plus nearly all of IOS's self-decompression, no idle time), wall
+time with the console off. Each step was measured on its own:
+
+| step | MIPS | note |
+|---|---|---|
+| start | 27.4 | |
+| bus fast paths: `region()` split into an inline table lookup and a cold decoder; DRAM/ROM reads, writes and fetches inline; one-load big-endian helpers | 31.8 | +16% |
+| network polled only when needed (frames from the guest, a running transfer, 20 ms housekeeping) | 31.8 | no gain: `perf`'s line attribution inside the inlined loop had pointed there wrongly |
+| hook pages: per-address hooks checked only on the few 4 KB pages that have them | 33.1 | +4% |
+| decode cache indexed by address instead of a hash of the word | 37.8 | +14% (core benchmark +8%) |
+| `Cpu::run_batch`: `step` inlined into one loop, no call per guest instruction | **40.3** | +7% |
+
+Total **+47%**. What's left is the interpreter doing its real work: fetch,
+decode and translation (~40%), instruction semantics (~34%), loads/stores
+(~13%), device sync (~8%). Going much further needs pre-decoded blocks or a
+JIT (chapter 14).
+
+**ROM memory clear** (`fastforward.rs`): ROMMON's `bzero_bytes` loop
+(4 instructions per byte) is replaced by one bulk fill of plain DRAM, with
+registers, CR1, PC and virtual time left as the loop would leave them:
+
+| ROMMON boot to `rommon 1 >` | before | after |
+|---|---|---|
+| 32 MB | 8.0 s | 0.1 s |
+| 128 MB | 25.7 s | 0.2 s |
+
+**Exactness, proven instead of claimed.** `tests/boot.rs::rom_accelerators_are_exact`
+boots the ROM with and without the accelerators and stops both at
+ROMMON's first key poll. Cycle count, timebase, registers, CR, console
+output and all of RAM must be identical, and are. The bulk fill was exact
+from the start; the test found three bugs in the older delay-loop
+fast-forward (chapter 8.6), and fixing one of them first made the network
+test 3× slower. That was a lesson in its own right: PIT expiries bound a
+skip only when the PIT interrupt is unmasked. ROMMON polls a masked PIT,
+whose sticky PS flag makes merged expiries indistinguishable on real
+hardware too.
+
+**Result for IOS** (same scenario as 15.6):
+
+| | before idle detection | idle detection | + steps 1 and 2 |
+|---|---|---|---|
+| `Router>` reached | 318 s | 216 s | **153 s** |
+| ping | `.!!!!` | `.!!!!` | `.!!!!` |
+| 30 s idle on the wall clock | | 80 s virtual (catching up) | 30.1 s virtual |
+
+With the faster boot, virtual time catches up with the wall clock during
+the boot already, so the idle router keeps exact real time from the
+prompt on.

@@ -5,9 +5,15 @@
 //! `mtspr`, `cmpw`, indexed loads/stores...) that list is long: ~40 ns per
 //! decode versus ~4 ns for everything else (`examples/decode_bench.rs`).
 //! Since decoding is a pure function of the 32-bit instruction word, we can
-//! remember recent results in a direct-mapped table indexed by a hash of the
-//! word. A hit costs one comparison. Because the key is the word itself (not
-//! the address), self-modifying code and code loaded into RAM stay correct.
+//! remember recent results in a direct-mapped table. A hit costs one
+//! comparison. The *tag* is the word itself, so self-modifying code and code
+//! loaded into RAM stay correct whatever slot it lands in.
+//!
+//! The table is indexed by the instruction's **address**: sequential code
+//! uses consecutive slots (8 per 64-byte cache line), so a loop's working set
+//! stays in the host's L1 cache. The first version indexed by a hash of the
+//! word, which scattered every lookup over the 128 KB table; `perf` showed
+//! the lookup as the hottest spot of the whole interpreter.
 
 use powerpc::{Extensions, Ins, Opcode};
 
@@ -25,10 +31,10 @@ impl DecodeCache {
         DecodeCache { entries: vec![(0, zero); ENTRIES].into_boxed_slice() }
     }
 
+    /// Decode `word`, fetched from address `pc` (used only to pick the slot).
     #[inline]
-    pub fn decode(&mut self, word: u32) -> Ins {
-        // Fibonacci hashing: multiply by 2^32/phi and keep the top bits.
-        let slot = (word.wrapping_mul(0x9E37_79B1) >> (32 - 14)) as usize;
+    pub fn decode(&mut self, word: u32, pc: u32) -> Ins {
+        let slot = (pc >> 2) as usize & (ENTRIES - 1);
         let entry = &mut self.entries[slot];
         if entry.0 != word {
             *entry = (word, Ins::new(word, Extensions::none()).op);

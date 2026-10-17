@@ -352,6 +352,12 @@ impl Mpc860 {
         if piscr & 0x0001 == 0 || piscr & 0x0004 == 0 {
             return None; // PTE or PIE clear
         }
+        // Masked in the SIU (ROMMON polls PS instead): expiries can't reach
+        // the CPU, and PS is sticky, so merging several is what the hardware
+        // does too. Only an unmasked PIT bounds a skip.
+        if self.load32(SIMASK) & Self::level_field_to_sipend((piscr >> 8) as u8) == 0 {
+            return None;
+        }
         if piscr & 0x0080 != 0 {
             return Some(0); // PS already set
         }

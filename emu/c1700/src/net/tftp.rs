@@ -84,6 +84,11 @@ impl TftpServer {
     }
 
     /// Handle received packets and timeouts. Returns true if anything was sent.
+    /// A transfer is running (it has retransmission timers to serve).
+    pub fn busy(&self) -> bool {
+        !self.transfers.is_empty()
+    }
+
     pub fn service(&mut self, sockets: &mut SocketSet<'static>, now: Instant) -> bool {
         let mut sent = false;
 

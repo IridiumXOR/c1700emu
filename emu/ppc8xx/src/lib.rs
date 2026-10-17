@@ -192,6 +192,17 @@ impl Exception {
     }
 }
 
+/// Why [`Cpu::run_batch`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchEnd {
+    /// `max` instructions executed.
+    Budget,
+    /// The next instruction is one the caller wants to look at first.
+    Hook,
+    /// The last instruction ended in checkstop.
+    Checkstop,
+}
+
 /// What happened during one [`Cpu::step`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -320,8 +331,32 @@ impl Cpu {
         if self.msr & msr::IP != 0 { 0xFFF0_0000 } else { 0 }
     }
 
+    /// Run up to `max` instructions with `step` inlined into one loop (no
+    /// call per guest instruction). Stops early, *before* executing it, when
+    /// `stop_before(pc)` is true for the next instruction (the caller has a
+    /// hook there), or after a checkstop. Returns the instructions executed.
+    pub fn run_batch<P: Platform>(&mut self, sys: &mut P, max: u64, mut stop_before: impl FnMut(u32) -> bool) -> (u64, BatchEnd) {
+        let mut n = 0;
+        while n < max {
+            if stop_before(self.pc) {
+                return (n, BatchEnd::Hook);
+            }
+            let outcome = self.step_inline(sys);
+            n += 1;
+            if outcome == StepOutcome::Checkstop {
+                return (n, BatchEnd::Checkstop);
+            }
+        }
+        (n, BatchEnd::Budget)
+    }
+
     /// Execute one instruction (or enter one pending interrupt).
     pub fn step<P: Platform>(&mut self, sys: &mut P) -> StepOutcome {
+        self.step_inline(sys)
+    }
+
+    #[inline(always)]
+    fn step_inline<P: Platform>(&mut self, sys: &mut P) -> StepOutcome {
         // 1. Asynchronous interrupts are recognised between instructions,
         //    only when MSR[EE]=1. External has priority over the decrementer
         //    (MPC860UM §6.1.2 "Exception Ordering").
@@ -357,7 +392,7 @@ impl Cpu {
         // 3. Decode (powerpc crate) and execute. `execute` advances self.pc on
         //    success; on failure it returns the exception to take and leaves
         //    self.pc pointing at the faulting instruction.
-        let ins = self.decoder.decode(word);
+        let ins = self.decoder.decode(word, pc);
         let outcome = match self.execute(ins, sys) {
             Ok(()) => StepOutcome::Normal,
             Err(exc) => self.enter_exception(exc, pc),

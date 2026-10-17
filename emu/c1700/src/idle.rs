@@ -97,6 +97,9 @@ pub struct Idle {
     pub anchor: Option<u32>,
     /// Known anchors still to be checked against the code (auto mode).
     pub candidates: Vec<u32>,
+    /// 4 KB pages of the anchor and candidates: the machine only runs its
+    /// per-address checks on these pages.
+    pub hook_pages: Vec<u32>,
     last_hit: u64,
     /// The most recent distances between anchor hits (ring, newest at `pos`).
     deltas: [u64; 2 * MAX_PERIOD],
@@ -118,10 +121,12 @@ impl Idle {
             (_, Some(AnchorChoice::Fixed(pc))) => (Some(pc), vec![]),
             (_, Some(AnchorChoice::Auto)) => (None, KNOWN_ANCHORS.iter().map(|k| k.pc).collect()),
         };
+        let hook_pages = anchor.iter().chain(&candidates).map(|pc| pc >> 12).collect();
         Idle {
             mode,
             anchor,
             candidates,
+            hook_pages,
             last_hit: 0,
             deltas: [u64::MAX; 2 * MAX_PERIOD],
             pos: 0,
@@ -146,6 +151,7 @@ impl Idle {
             log::info!(target: "idle", "idle anchor {pc:#010x} recognised: {}", k.image);
             self.anchor = Some(pc);
             self.candidates.clear();
+            self.hook_pages = vec![pc >> 12];
         }
     }
 
@@ -154,6 +160,7 @@ impl Idle {
         if auto && self.mode != IdleMode::Off {
             self.anchor = None;
             self.candidates = KNOWN_ANCHORS.iter().map(|k| k.pc).collect();
+            self.hook_pages = self.candidates.iter().map(|pc| pc >> 12).collect();
         }
     }
 

@@ -7,7 +7,7 @@ chapter with the full story.
 
 | Feature | State |
 |---------|-------|
-| Boot the real ROM (`CISCO_bootrom_AT27C040.bin`, System Bootstrap 12.2(1r)XE1) to `rommon 1 >` | ✅ ~5 s |
+| Boot the real ROM (`CISCO_bootrom_AT27C040.bin`, System Bootstrap 12.2(1r)XE1) to `rommon 1 >` | ✅ ~0.1 s |
 | ROMMON commands (`help`, `confreg`, `meminfo`, `dev`, `set`, `cookie`, `dir`, `reset`, ...) | ✅ |
 | Console on the terminal (raw mode) and over telnet | ✅ |
 | BREAK from the terminal (`Ctrl-] b`) or telnet (`send brk`) | ✅ |
@@ -24,7 +24,7 @@ chapter with the full story.
 | Real IOS 12.3(11)T2: `tftpdnld -r` → self-decompress → IOS setup dialog | ✅ ~6.5 min ([chapter 9](09-ios-images.md)) |
 | Real IOS 12.4(8) on a 1760, from internal flash → `Router>`; `show version/interfaces/diag/flash:` | ✅ ~4.8 min ([chapter 10](10-ios-roadmap.md)); FastEthernet0/0 detected, link up |
 | IOS networking: ARP + `ping 10.0.2.2` from IOS to the virtual host | ✅ `.!!!!` ([chapter 13](13-ios-networking.md)): FEC + IDMA + MMU |
-| Idle detection: IOS's idle loop skipped, idle router ~0% host CPU | ✅ boot to `Router>` 318 → 206 s ([chapter 15](15-profiling-and-idle.md)) |
+| Idle detection + interpreter fast paths: idle router ~0% host CPU, ~40 MIPS | ✅ IOS boot to `Router>` 318 → 153 s ([chapter 15](15-profiling-and-idle.md)) |
 | 8xx MMU (ITLB/DTLB, table-walk assist, protection, TLB exceptions) | ✅ IOS boots with translation on ([chapter 12](12-mmu.md)) |
 | Network bridge to the real LAN | ❌ only the built-in virtual network |
 

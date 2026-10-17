@@ -170,10 +170,10 @@ impl Board {
         if self.net.is_some() && self.now_cycles - self.last_net_poll >= NET_POLL_INTERVAL {
             self.last_net_poll = self.now_cycles;
             let now_us = self.now_cycles / CYCLES_PER_US;
-            if let Some(net) = &mut self.net {
+            if let Some(net) = self.net.as_mut().filter(|n| n.wants_poll(now_us)) {
                 net.poll(now_us);
+                self.fec_dma(); // deliver whatever the network answered
             }
-            self.fec_dma(); // deliver whatever the network answered
         }
         self.update_irq();
     }
@@ -208,17 +208,27 @@ impl Board {
         self.mpc.map_dirty = false;
     }
 
-    /// Look up (and lazily decode) the region an address belongs to.
-    #[inline]
+    /// Look up (and lazily decode) the region an address belongs to. The
+    /// common case is one table read; decoding is kept out of line so this
+    /// inlines into every access (it was 11% of host time as a call).
+    #[inline(always)]
     fn region(&mut self, addr: u32) -> Region {
+        if !self.mpc.map_dirty {
+            let r = self.map[(addr >> PAGE_SHIFT) as usize];
+            if r != Region::Stale {
+                return r;
+            }
+        }
+        self.region_slow(addr)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn region_slow(&mut self, addr: u32) -> Region {
         if self.mpc.map_dirty {
             self.invalidate_map();
         }
         let page = (addr >> PAGE_SHIFT) as usize;
-        let r = self.map[page];
-        if r != Region::Stale {
-            return r;
-        }
         let r = self.decode(addr & !PAGE_MASK);
         self.map[page] = r;
         r
@@ -292,6 +302,27 @@ impl Board {
         Some(u32::from_be_bytes(b))
     }
 
+    /// Fill `len` bytes at `addr` with `value`, but only if the whole range
+    /// is plain DRAM (no devices, no side effects); otherwise change nothing
+    /// and return false. Used by the ROM memory-clear accelerator.
+    pub fn fill_dram(&mut self, addr: u32, len: u32, value: u8) -> bool {
+        let Some(end) = addr.checked_add(len) else { return false };
+        let mut chunks = Vec::new();
+        let mut a = addr;
+        while a < end {
+            let n = (PAGE_SIZE - (a & PAGE_MASK)).min(end - a);
+            match self.region(a) {
+                Region::Dram { bank, base } => chunks.push((bank as usize, (base + (a & PAGE_MASK)) as usize, n as usize)),
+                _ => return false,
+            }
+            a += n;
+        }
+        for (bank, off, n) in chunks {
+            self.dram[bank][off..off + n].fill(value);
+        }
+        true
+    }
+
     pub fn poke8(&mut self, addr: u32, value: u8) -> bool {
         match self.region(addr) {
             Region::Dram { bank, base } => {
@@ -315,12 +346,12 @@ impl Board {
 #[inline]
 fn be16(mem: &[u8], off: u32) -> u16 {
     let o = off as usize;
-    u16::from_be_bytes([mem[o], mem[o + 1]])
+    u16::from_be_bytes(mem[o..o + 2].try_into().unwrap())
 }
 #[inline]
 fn be32(mem: &[u8], off: u32) -> u32 {
     let o = off as usize;
-    u32::from_be_bytes([mem[o], mem[o + 1], mem[o + 2], mem[o + 3]])
+    u32::from_be_bytes(mem[o..o + 4].try_into().unwrap())
 }
 #[inline]
 fn put16(mem: &mut [u8], off: u32, v: u16) {
@@ -333,8 +364,9 @@ fn put32(mem: &mut [u8], off: u32, v: u32) {
     mem[o..o + 4].copy_from_slice(&v.to_be_bytes());
 }
 
-impl Platform for Board {
-    fn read8(&mut self, addr: u32) -> Result<u8, BusError> {
+impl Board {
+    #[inline(never)]
+    fn read8_slow(&mut self, addr: u32) -> Result<u8, BusError> {
         let low = addr & PAGE_MASK;
         let v = match self.region(addr) {
             Region::Dram { bank, base } => self.dram[bank as usize][(base + low) as usize],
@@ -355,7 +387,8 @@ impl Platform for Board {
         Ok(v)
     }
 
-    fn read16(&mut self, addr: u32) -> Result<u16, BusError> {
+    #[inline(never)]
+    fn read16_slow(&mut self, addr: u32) -> Result<u16, BusError> {
         let low = addr & PAGE_MASK;
         let v = match self.region(addr) {
             Region::Dram { bank, base } => be16(&self.dram[bank as usize], base + low),
@@ -373,7 +406,8 @@ impl Platform for Board {
         Ok(v)
     }
 
-    fn read32(&mut self, addr: u32) -> Result<u32, BusError> {
+    #[inline(never)]
+    fn read32_slow(&mut self, addr: u32) -> Result<u32, BusError> {
         let low = addr & PAGE_MASK;
         let v = match self.region(addr) {
             Region::Dram { bank, base } => be32(&self.dram[bank as usize], base + low),
@@ -399,7 +433,8 @@ impl Platform for Board {
         Ok(v)
     }
 
-    fn write8(&mut self, addr: u32, value: u8) -> Result<(), BusError> {
+    #[inline(never)]
+    fn write8_slow(&mut self, addr: u32, value: u8) -> Result<(), BusError> {
         if self.watch.is_some() {
             self.watch_access(addr, 1, value as u32, true);
         }
@@ -422,7 +457,8 @@ impl Platform for Board {
         Ok(())
     }
 
-    fn write16(&mut self, addr: u32, value: u16) -> Result<(), BusError> {
+    #[inline(never)]
+    fn write16_slow(&mut self, addr: u32, value: u16) -> Result<(), BusError> {
         if self.watch.is_some() {
             self.watch_access(addr, 2, value as u32, true);
         }
@@ -446,7 +482,8 @@ impl Platform for Board {
         Ok(())
     }
 
-    fn write32(&mut self, addr: u32, value: u32) -> Result<(), BusError> {
+    #[inline(never)]
+    fn write32_slow(&mut self, addr: u32, value: u32) -> Result<(), BusError> {
         if self.watch.is_some() {
             self.watch_access(addr, 4, value as u32, true);
         }
@@ -471,6 +508,88 @@ impl Platform for Board {
             Region::Unmapped | Region::Stale => return Err(self.bus_error(addr, "write32")),
         }
         Ok(())
+    }
+}
+
+impl Platform for Board {
+    // Fast paths: plain DRAM (and ROM for reads) with no --watch active is a
+    // table lookup and a slice access, inlined into the CPU loop; everything
+    // else (devices, flash, IMMR, watch logging) goes to the `*_slow` bodies.
+
+    #[inline]
+    fn read8(&mut self, addr: u32) -> Result<u8, BusError> {
+        if self.watch.is_none() {
+            if let Region::Dram { bank, base } = self.region(addr) {
+                return Ok(self.dram[bank as usize][(base + (addr & PAGE_MASK)) as usize]);
+            }
+        }
+        self.read8_slow(addr)
+    }
+
+    #[inline]
+    fn read16(&mut self, addr: u32) -> Result<u16, BusError> {
+        if self.watch.is_none() {
+            if let Region::Dram { bank, base } = self.region(addr) {
+                return Ok(be16(&self.dram[bank as usize], base + (addr & PAGE_MASK)));
+            }
+        }
+        self.read16_slow(addr)
+    }
+
+    #[inline]
+    fn read32(&mut self, addr: u32) -> Result<u32, BusError> {
+        if self.watch.is_none() {
+            match self.region(addr) {
+                Region::Dram { bank, base } => return Ok(be32(&self.dram[bank as usize], base + (addr & PAGE_MASK))),
+                Region::Rom { base } => return Ok(be32(&self.rom, base + (addr & PAGE_MASK))),
+                _ => {}
+            }
+        }
+        self.read32_slow(addr)
+    }
+
+    #[inline]
+    fn write8(&mut self, addr: u32, value: u8) -> Result<(), BusError> {
+        if self.watch.is_none() {
+            if let Region::Dram { bank, base } = self.region(addr) {
+                self.dram[bank as usize][(base + (addr & PAGE_MASK)) as usize] = value;
+                return Ok(());
+            }
+        }
+        self.write8_slow(addr, value)
+    }
+
+    #[inline]
+    fn write16(&mut self, addr: u32, value: u16) -> Result<(), BusError> {
+        if self.watch.is_none() {
+            if let Region::Dram { bank, base } = self.region(addr) {
+                put16(&mut self.dram[bank as usize], base + (addr & PAGE_MASK), value);
+                return Ok(());
+            }
+        }
+        self.write16_slow(addr, value)
+    }
+
+    #[inline]
+    fn write32(&mut self, addr: u32, value: u32) -> Result<(), BusError> {
+        if self.watch.is_none() {
+            if let Region::Dram { bank, base } = self.region(addr) {
+                put32(&mut self.dram[bank as usize], base + (addr & PAGE_MASK), value);
+                return Ok(());
+            }
+        }
+        self.write32_slow(addr, value)
+    }
+
+    /// Instruction fetch: no watch logging (the watch is for data), so DRAM
+    /// and ROM are always the fast path.
+    #[inline]
+    fn fetch(&mut self, addr: u32) -> Result<u32, BusError> {
+        match self.region(addr) {
+            Region::Dram { bank, base } => Ok(be32(&self.dram[bank as usize], base + (addr & PAGE_MASK))),
+            Region::Rom { base } => Ok(be32(&self.rom, base + (addr & PAGE_MASK))),
+            _ => self.read32_slow(addr),
+        }
     }
 
     fn read_spr(&mut self, n: u16) -> Option<u32> {

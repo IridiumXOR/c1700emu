@@ -42,3 +42,48 @@ fn boots_image_preloaded_in_internal_flash() {
     let text = expect(&mut m, "Hello from a TFTP-booted image!", 1_000_000_000);
     assert!(text.contains("program load complete, entry point: 0x80008000"), "{text}");
 }
+
+/// The ROM accelerators (delay-loop fast-forward, bulk memory clear) must be
+/// invisible to the guest: stopped at the same instruction (ROMMON's first
+/// wait for a key), virtual time, timebase, registers, console output and
+/// all of RAM are identical with and without them.
+#[test]
+fn rom_accelerators_are_exact() {
+    if !rom_available() {
+        return;
+    }
+    use c1700emu::machine::StopReason;
+    const FIRST_KEY_POLL: u32 = 0xFFF0_BCAC; // uart_getc_nowait
+    let run = |delay_loops: bool, memory_clear: bool| {
+        let cfg = BoardConfig { dram_banks: [16 << 20, 0, 0, 0], net: None, ..BoardConfig::default() };
+        let mut m = new_machine(&cfg, 0x2100);
+        m.fast_forward.restrict(delay_loops, memory_clear);
+        m.breakpoints.insert(FIRST_KEY_POLL);
+        let mut out = Vec::new();
+        loop {
+            match m.run(1_000_000, false) {
+                StopReason::Breakpoint(_) => break,
+                StopReason::Budget => assert!(m.cpu.cycles < 3_000_000_000, "never reached ROMMON's key poll"),
+                other => panic!("{other:?}"),
+            }
+            out.extend(m.take_console_output());
+        }
+        out.extend(m.take_console_output());
+        let ram = m.board.dram[0].clone();
+        let exc: Vec<(usize, u64)> = m.cpu.exception_counts.iter().copied().enumerate().filter(|(_, n)| *n > 0).collect();
+        eprintln!("delay_loops={delay_loops} memory_clear={memory_clear}: exceptions {exc:x?}, skipped ticks {}", m.fast_forward.skipped_ticks);
+        (m.cpu.cycles, m.cpu.tb, m.cpu.gpr, m.cpu.cr, String::from_utf8_lossy(&out).into_owned(), ram, m.fast_forward.bulk_cleared)
+    };
+    let slow = run(false, false);
+    let only_delay = run(true, false);
+    let only_clear = run(false, true);
+    eprintln!("cycles: none {} / delay loops only {} / memory clear only {}", slow.0, only_delay.0, only_clear.0);
+    let fast = run(true, true);
+    assert!(fast.6 > 15 << 20, "the 16 MB memory clear was done in bulk ({} bytes)", fast.6);
+    assert_eq!(slow.6, 0);
+    assert_eq!(fast.0, slow.0, "same virtual time at the breakpoint");
+    assert_eq!((fast.1, fast.2, fast.3), (slow.1, slow.2, slow.3), "same timebase and registers");
+    assert_eq!(fast.4, slow.4, "same console output");
+    assert!(fast.5 == slow.5, "same RAM contents");
+    eprintln!("both reach the first key poll at {} cycles", fast.0);
+}

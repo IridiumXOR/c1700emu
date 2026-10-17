@@ -10,7 +10,7 @@ use crate::fastforward::FastForward;
 use crate::idle::{Idle, IdleMode};
 use crate::mpc860::rsr;
 use powerpc::{Extensions, Ins};
-use ppc8xx::{Cpu, Platform, StepOutcome, msr};
+use ppc8xx::{BatchEnd, Cpu, Platform, StepOutcome, msr};
 use std::collections::{BTreeSet, HashMap};
 
 /// Instructions between two device updates (timers, interrupt line).
@@ -18,6 +18,15 @@ pub const DEVICE_SYNC_INTERVAL: u64 = 256;
 
 /// PLPRCR[CSR]: checkstop reset enable.
 const PLPRCR_CSR: u32 = 0x0000_0080;
+
+/// What [`Machine::run`] does after the per-address hooks.
+enum Hook {
+    /// Execute the instruction.
+    Run,
+    /// A hook changed the CPU state (bulk memory clear): look again.
+    Again,
+    Stop(StopReason),
+}
 
 /// Why [`Machine::run`] returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,63 +128,109 @@ impl Machine {
     /// from a breakpoint).
     pub fn run(&mut self, budget: u64, ignore_breakpoint_at_start: bool) -> StopReason {
         let check_bp = !self.breakpoints.is_empty();
-        for i in 0..budget {
+        // Breakpoints, trace, profile and watch need a look at every
+        // instruction; the other hooks live at a few known addresses, so an
+        // ordinary instruction only pays for one page test (`is_hook_page`).
+        let slow = check_bp || self.trace || self.profile.is_some() || self.board.watch.is_some();
+        let mut done = 0;
+        while done < budget {
             let pc = self.cpu.pc;
-            if check_bp && self.breakpoints.contains(&pc) && !(i == 0 && ignore_breakpoint_at_start) {
-                self.sync_devices();
-                return StopReason::Breakpoint(pc);
-            }
-            if self.trace {
-                self.trace_instruction(pc);
-            }
-            if self.idle.is_candidate(pc) {
-                let code = [0, 4, 8, 12].map(|o| self.peek_word(pc + o).unwrap_or(0));
-                self.idle.check_candidate(pc, code);
-            }
-            if self.idle.anchor == Some(pc) && self.idle.at_anchor(self.cpu.cycles, self.cpu.msr & msr::EE != 0) {
-                self.idle_skip();
-                if self.pace_limit.is_some_and(|limit| self.cpu.cycles >= limit) {
-                    return StopReason::Budget;
+            if slow || self.is_hook_page(pc) {
+                // One instruction at a time, with the per-address hooks.
+                match self.before_step(pc, check_bp && !(done == 0 && ignore_breakpoint_at_start)) {
+                    Hook::Run => {}
+                    Hook::Again => continue,
+                    Hook::Stop(reason) => return reason,
                 }
-            }
-            if self.fast_forward.is_candidate(pc) {
-                // The guest is about to spin on the timebase: let the time pass.
-                self.unsynced += self.fast_forward.try_skip(&mut self.cpu);
-            }
-            if let Some(prof) = &mut self.profile {
-                let idx = (pc.wrapping_sub(PROFILE_BASE) / 4) as usize;
-                if idx < PROFILE_WORDS {
-                    prof[idx] += 1;
+                if let Some(w) = &mut self.board.watch {
+                    w.pc = pc;
                 }
-                self.sample_countdown -= 1;
-                if self.sample_countdown == 0 {
-                    self.sample_countdown = SAMPLE_PERIOD;
-                    if let Some(samples) = &mut self.pc_samples {
-                        *samples.entry(pc).or_insert(0) += 1;
+                let outcome = self.cpu.step(&mut self.board);
+                if let Some(w) = &mut self.board.watch {
+                    w.pc = u32::MAX;
+                }
+                done += 1;
+                self.unsynced += 1;
+                if outcome == StepOutcome::Checkstop {
+                    if let Some(reason) = self.on_checkstop() {
+                        return reason;
                     }
-                    if let Some((_, window)) = &mut self.pc_window {
-                        *window.entry(pc).or_insert(0) += 1;
+                }
+            } else {
+                // Fast path: a batch until the next device sync, a hook page
+                // or a checkstop, with the core's step inlined.
+                let max = (DEVICE_SYNC_INTERVAL.saturating_sub(self.unsynced)).max(1).min(budget - done);
+                let hook_pages = &self.idle.hook_pages;
+                let (n, end) = self.cpu.run_batch(&mut self.board, max, |pc| is_hook_page(hook_pages, pc));
+                done += n;
+                self.unsynced += n;
+                if end == BatchEnd::Checkstop {
+                    if let Some(reason) = self.on_checkstop() {
+                        return reason;
                     }
                 }
             }
-            if let Some(w) = &mut self.board.watch {
-                w.pc = self.cpu.pc;
-            }
-            let outcome = self.cpu.step(&mut self.board);
-            if let Some(w) = &mut self.board.watch {
-                w.pc = u32::MAX;
-            }
-            if outcome == StepOutcome::Checkstop {
-                if let Some(reason) = self.on_checkstop() {
-                    return reason;
-                }
-            }
-            self.unsynced += 1;
             if self.unsynced >= DEVICE_SYNC_INTERVAL {
                 self.sync_devices();
             }
         }
         StopReason::Budget
+    }
+
+    #[inline(always)]
+    fn is_hook_page(&self, pc: u32) -> bool {
+        is_hook_page(&self.idle.hook_pages, pc)
+    }
+
+    /// The per-instruction hooks, run before executing the instruction at `pc`.
+    fn before_step(&mut self, pc: u32, check_bp: bool) -> Hook {
+        if check_bp && self.breakpoints.contains(&pc) {
+            self.sync_devices();
+            return Hook::Stop(StopReason::Breakpoint(pc));
+        }
+        if self.trace {
+            self.trace_instruction(pc);
+        }
+        if self.idle.is_candidate(pc) {
+            let code = [0, 4, 8, 12].map(|o| self.peek_word(pc + o).unwrap_or(0));
+            self.idle.check_candidate(pc, code);
+        }
+        if self.idle.anchor == Some(pc) && self.idle.at_anchor(self.cpu.cycles, self.cpu.msr & msr::EE != 0) {
+            self.idle_skip();
+            if self.pace_limit.is_some_and(|limit| self.cpu.cycles >= limit) {
+                return Hook::Stop(StopReason::Budget);
+            }
+        }
+        if self.fast_forward.is_bzero(pc) && self.board.watch.is_none() && !self.interrupt_pending() {
+            if let Some(fill) = self.fast_forward.bzero_plan(&self.cpu, self.pit_horizon()) {
+                if self.board.fill_dram(fill.addr, fill.len, fill.value) {
+                    self.unsynced += self.fast_forward.bzero_done(&mut self.cpu, &fill);
+                    return Hook::Again; // the CPU state changed: re-check from the top
+                }
+            }
+        }
+        if self.fast_forward.is_candidate(pc) && !self.interrupt_pending() {
+            // The guest is about to spin on the timebase: let the time pass.
+            let pit = self.pit_horizon();
+            self.unsynced += self.fast_forward.try_skip(&mut self.cpu, pit);
+        }
+        if let Some(prof) = &mut self.profile {
+            let idx = (pc.wrapping_sub(PROFILE_BASE) / 4) as usize;
+            if idx < PROFILE_WORDS {
+                prof[idx] += 1;
+            }
+            self.sample_countdown -= 1;
+            if self.sample_countdown == 0 {
+                self.sample_countdown = SAMPLE_PERIOD;
+                if let Some(samples) = &mut self.pc_samples {
+                    *samples.entry(pc).or_insert(0) += 1;
+                }
+                if let Some((_, window)) = &mut self.pc_window {
+                    *window.entry(pc).or_insert(0) += 1;
+                }
+            }
+        }
+        Hook::Run
     }
 
     /// The core stopped on a machine check with MSR[ME]=0. If PLPRCR[CSR] is
@@ -193,11 +248,23 @@ impl Machine {
     }
 
     /// Bring devices up to date with the CPU's virtual clock.
+    /// Will the CPU take an interrupt at the next instruction? Time must not
+    /// be skipped then, or the skipped periods would be lost.
+    fn interrupt_pending(&self) -> bool {
+        self.cpu.msr & msr::EE != 0 && (self.cpu.dec_pending || self.board.external_interrupt())
+    }
+
+    /// CPU cycles until the PIT's next interrupt, counting the cycles not yet
+    /// given to the devices (they advance in batches).
+    fn pit_horizon(&self) -> Option<u64> {
+        self.board.mpc.cycles_until_pit_interrupt().map(|c| c.saturating_sub(self.unsynced))
+    }
+
     /// The scheduler is idle: let virtual time pass up to the next timer
     /// interrupt (one timebase tick short), never past it.
     fn idle_skip(&mut self) {
         self.sync_devices();
-        if self.board.external_interrupt() {
+        if self.interrupt_pending() {
             return; // something is already pending: let it be taken
         }
         let div = self.cpu.tb_divider as u64;
@@ -456,4 +523,12 @@ fn sample_report(title: &str, samples: &HashMap<u32, u64>) -> String {
         out += &format!("    {addr:#010x}  {n:10}  {:5.1}%\r\n", pct(*n));
     }
     out
+}
+
+/// Pages (4 KB) holding a per-address hook: the ROM's delay loops and memory
+/// clear, and the idle anchor (or auto-mode candidates).
+#[inline(always)]
+fn is_hook_page(idle_pages: &[u32], pc: u32) -> bool {
+    let page = pc >> 12;
+    page == 0xFFF12 || page == 0xFFF16 || idle_pages.contains(&page)
 }

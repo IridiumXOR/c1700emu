@@ -103,10 +103,27 @@ primary opcode. For opcode 31 that list is long: `examples/decode_bench.rs`
 measured **~42 ns** per opcode-31 decode against ~4.5 ns on average — and
 opcode-31 instructions (`mr`, `mflr`, `mtspr`, `cmpw`, `stwx`...) are about a
 third of what the ROM executes. `decode_cache.rs` memoises results in a
-16 Ki-entry direct-mapped table indexed by a Fibonacci hash of the
-instruction word. Keying on the *word* (not the address) means self-modifying
-code and code copied into RAM can never get a stale opcode. Every slot starts
-as a valid memo of word 0, so there is no "empty" state to get wrong.
+16 Ki-entry direct-mapped table. The *tag* is the instruction word, so
+self-modifying code and code copied into RAM can never get a stale opcode.
+Every slot starts as a valid memo of word 0, so there is no "empty" state to
+get wrong.
+
+The slot is chosen by the instruction's **address**. The first version
+used a hash of the word, which spread even straight-line code over the
+whole 128 KB table, so almost every lookup missed the host's L1 cache;
+`perf` showed it as the hottest spot of the interpreter. Address indexing
+puts consecutive instructions in consecutive slots (8 per cache line):
++8% on the core benchmark, +14% on the full board (chapter 15.8).
+
+### The batch loop
+
+`Cpu::run_batch(sys, max, stop_before)` runs up to `max` instructions with
+`step` inlined into one loop. It stops *before* an instruction for which
+`stop_before(pc)` is true (the board has a hook there: ROM fast-forward,
+idle anchor) and after a checkstop. Calling `step` once per guest
+instruction cost a full function prologue/epilogue each time (~12% of the
+core's samples); the machine now uses `run_batch` for everything except
+hook pages and slow mode (trace, profile, watch, breakpoints).
 
 ---
 
@@ -374,12 +391,11 @@ real code takes TLB misses and the reload handlers from the manual
 ### Speed
 
 `cargo test --release -p ppc8xx --test throughput -- --ignored --nocapture`
-on a flat-RAM platform: **~88 million instructions/second** today, **~102**
-at the commit before the MMU (same machine, measured back to back). The
-translation checks cost ~14% even with translation off, more than they
-should; that's on the speed list (chapter 14). On the real board, under
-IOS with translation on, the whole emulator does **~23 MIPS** (address
-decoding, devices, TLB lookups).
+on a flat-RAM platform: **~94 million instructions/second** today (~88 after
+the MMU was added, ~102 before it; same machine, measured back to back). The
+translation checks still cost a little even with translation off. On the
+real board the whole emulator does **~40 MIPS** on the IOS decompression
+benchmark (it was ~27 before the work in chapter 15.8).
 
 ---
 

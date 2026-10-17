@@ -143,9 +143,9 @@ The bigger wins for the *experience* of using the emulator aren't the JIT:
 1. **Snapshots**: save the whole machine at `Router>` and restore in
    seconds. That turns the 5-minute boot into a few seconds no matter how
    fast the CPU is.
-2. **Profile and fix the cheap overheads** with `perf`: the 14% MMU-off
-   cost, the decode path, a direct DRAM fast path, batching the timebase.
-   Expected 1.5-2×.
+2. **Profile and fix the cheap overheads** with `perf`. **Done**
+   (chapter 15.8): +47% interpreter speed (27 → 40 MIPS), the ROM's memory
+   clear in bulk, IOS boot 216 → 153 s.
 3. **IOS idle detection**: recognise the idle loop and advance virtual time
    to the next timer interrupt. **Done** (chapter 15): boot 318 → 206 s, an
    idle router uses ~0% CPU.
