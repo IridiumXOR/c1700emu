@@ -47,7 +47,7 @@ FastEthernet0/0 ... Hardware is PQUICC_FEC, address is 0217.0000.0001
 | 3 | **FPGA configuration port**, IO FPGA 0x4C (1760) | the 1760 hung right after decompression: loop waiting for INIT_B; then IOS bit-bangs a 166 980-byte Xilinx XC2S200 bitstream. Now configured, DONE raised (chapter 11.6) | returns 0xFF, "probably used to update the fpga" ✅ |
 | 4 | **CPM SPI engine** + WIC/slot ID EEPROMs | see below: two bugs | ✅ EEPROMs read over SPI |
 | 5 | **FEC**: graceful stop (X_CNTRL.GTS → I_EVENT.GRA), CPM interrupt controller | run A: ECNTRL written 10 071×, MII 273 000× (IOS re-initialising the interface endlessly). Run B: 151 and 360; FastEthernet0/0 detected | FEC ✅ |
-| 6 | **PHY status** (LXT971 register 17) | `show interfaces` said "Half-duplex": our value 0x4C00 had the collision bit (0x0800) instead of full duplex (0x0200). Now 0x4780 | models an LXT970A (ID 0x7810) instead; the ROM checks for the LXT971's ID1 0x0013 |
+| 6 | **PHY status** (LXT971 register 17) | `show interfaces` said "Half-duplex": our value 0x4C00 had the collision bit (0x0800) instead of full duplex (0x0200). Now 0x4780: verified, IOS reports "Full-duplex, 100Mb/s" | models an LXT970A (ID 0x7810) instead; the ROM checks for the LXT971's ID1 0x0013 |
 
 **The SPI story, a lesson in checking your own explanations.** In run A,
 IOS started 5 416 SPI transfers and read the DPRAM 88.7 million times. I
