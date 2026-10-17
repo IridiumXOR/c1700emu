@@ -34,9 +34,8 @@ FastEthernet0/0 ... Hardware is PQUICC_FEC, address is 0217.0000.0001
   mainboard EEPROM are all built by IOS from our cookie.
 * Flash: Intel 28F128J3 x16 × 2; IOS lists our flash file system.
 * FastEthernet0/0: detected, link up, 15 frames transmitted while it was up.
-* MMU: IOS loads TLB entries (M_TWB = 0x038B0000, pinned entries) and turns
-  translation on. Identity mapping is enough (Dynamips takes the same
-  shortcut).
+* MMU: emulated (chapter 12). IOS pins 44 TLB entries and runs with
+  translation on: 0 TLB misses per boot, read-only text enforced.
 
 ## 10.2 What blocked the prompt, and how each was fixed
 
@@ -85,7 +84,7 @@ other devices; still to decode.
 
 | What | Evidence | Probable cause / next step |
 |------|----------|----------------------------|
-| `Processor board ID 0000 (1314672220)` | `show version` | IOS reads the serial number from a different cookie field/format than our BCD field |
+| ~~`Processor board ID 0000 (1314672220)`~~ | `show version` | fixed: the serial lives at cookie 0x18 in Cisco format (chapter 4); now `EMU1234C170` |
 | 5 machine checks | `--stats` exceptions | probably bus probes of absent devices (normal on hardware); identify the PCs |
 | slot registers at 0x68030000, 0x68040000, 0x68080000, 0x680B0000 | each written twice with 0x05 and read twice; logged as unknown devices | WIC/VIC slot control registers (4 slots on a 1760). IOS probes 0x68040000 for slot 1 where Dynamips says 0x68031000: IOS wins |
 | IO FPGA registers 0x0A, 0x0C, 0x1C, 0x5C, 0x6C | first touched on the 1760 | meaning unknown; currently plain latches |
@@ -95,10 +94,9 @@ other devices; still to decode.
 
 | Area | What | Why |
 |------|------|-----|
-| Networking | FEC receive path under IOS + virtual network / host bridge (TAP or NAT) | `ping`, telnet into the router, TFTP from IOS (`no shutdown` on Fa0/0 first) |
+| Networking | ✅ receive path (IDMA, chapter 13): IOS pings the virtual host. Missing: host bridge / port forward (TAP or NAT) | telnet into the router from the PC, TFTP from IOS to a real server |
 | WAN cards | CPM **SCC** in HDLC mode + WIC-1T/2T: EEPROM contents over SPI (now working), slot registers | serial interfaces |
 | AUX port | channel B exists; give it its own TCP port | modem/aux line |
-| MMU | real 8xx TLB (ITLB/DTLB miss exceptions 0x1100/0x1200, MI/MD_EPN/RPN/TWC, M_TWB table walk, protection) | correctness beyond boot (write-protected text, I/O mappings) |
 | Watchdog | software watchdog (IOS services SWSR ~42 000× per boot) | fidelity (not needed to run) |
 | Speed | faster interpreter, or **snapshots** (save the machine once IOS is up, restore in seconds) | ~4.8 minutes to `Router>` today |
 

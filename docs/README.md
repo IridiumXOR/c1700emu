@@ -20,6 +20,8 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 9 | [Checking IOS images](09-ios-images.md) | why `file` says "MIPS-X", proving images are MPC8xx code, `-mz` = loader + ZIP |
 | 10 | [Towards full IOS emulation](10-ios-roadmap.md) | what IOS uses that is still missing, with the evidence for each item |
 | 11 | [Internal flash & router model](11-internal-flash-and-models.md) | the C1700's only boot device, Intel x16 flash, flash file system, `--flash-file`, PM ID / `--model` |
+| 12 | [The MPC8xx MMU](12-mmu.md) | software-loaded TLBs, table-walk assist, how IOS pins its memory map, the emulation and its tests |
+| 13 | [IOS networking](13-ios-networking.md) | why received frames got stuck, the `--watch` tool, the IDMA copy engine, the first ping |
 
 Reference material:
 
@@ -35,3 +37,6 @@ Reference material:
 * `tools/iosdis.py` — disassembles a range of a decompressed IOS image.
 * `tools/xbit.py` — parses a Xilinx configuration bitstream found inside an image.
 * `tools/gdb_sample.py` — finds where a guest hangs: runs it under the GDB stub, interrupts, dumps the PC and code.
+* `tools/ios_session.py` — drives an IOS boot and a list of commands unattended (setup dialog, `show`, `ping`...).
+* `tools/ios_refs.py` — finds code referencing a string or an address in a decompressed IOS image.
+* `tools/ida/ios_124_8_names.py` — IDA annotations for IOS 12.4(8) (the database stays local in `ida-ios/`).

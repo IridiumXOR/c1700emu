@@ -70,6 +70,11 @@ network, the same idea as QEMU's "user networking":
 * `net/mod.rs`: a **virtual cable** (two frame queues) implementing smoltcp's
   `phy::Device`; a smoltcp `Interface` owns two addresses, **10.0.2.2** (the
   server) and **10.0.2.1** (to use as DEFAULT_GATEWAY), answers ARP and ping.
+  *Correction:* ping did **not** work until IOS tried it. smoltcp only
+  answers echo requests with its `auto-icmp-echo-reply` cargo feature, which
+  our minimal feature list (`default-features = false`) had left out.
+  ROMMON only uses ARP and TFTP, so nothing noticed. The unit test
+  `net::tests::virtual_host_answers_ping` now covers it.
 * `net/tftp.rs`: a read-only **TFTP server** (RFC 1350) on smoltcp UDP
   sockets: RRQ on port 69 → a new port (transfer ID) per transfer → DATA
   blocks of 512 bytes, each sent after the previous ACK, retransmission after

@@ -75,23 +75,40 @@ source ROMMON unmasks.
 | ...   |   | ROMMON environment ("monitor variables"), written by `sync` |
 | 0x65A | 132 | cookie backup copy |
 
-**Cookie data** (from the field table at 0xFFF2FCAC used by `cookie` editing):
+**Cookie data**, from the ROMMON cookie editor's field table at
+0xFFF2FCAC: entries of (name, length), offsets cumulative. Decoding it
+programmatically gives:
 
-| Offset | Len | Field |
-|--------|-----|-------|
-| 0 | 1 | interfaces (code, e.g. 1 = "1E1T") |
-| 1 | 1 | vendor (1 = cisco) |
-| 2 | 6 | Ethernet MAC address |
-| 8 | 1 | processor — **must be 0x33** or "Unknown Processor type found in cookie" |
-| 16 | 4 | BCD-packed 8-digit serial number |
-| 29 | 2 | capabilities |
-| 31 | 1 | cookie version |
+| Offset | Len | Field (ROM's own description) |
+|--------|-----|-------------------------------|
+| 0x00 | 1 | version |
+| 0x01 | 1 | vendor (recommended 01 = cisco) |
+| 0x02 | 6 | Ethernet MAC address |
+| 0x08 | 1 | processor (recommended 33) — **must be 0x33** or "Unknown Processor type found in cookie" |
+| 0x09 | 1 | NVRAM size (32K = 00, 64K = 01) |
+| 0x0A | 1 | CPU speed (50 MHz = 01) |
+| 0x0B | 1 | unused |
+| 0x0C | 2 | on-board PM ID (1720: 00 B2) — the router model, chapter 11.5 |
+| 0x0E | 2 | MAC addresses allocated |
+| 0x10 | 8 | (unnamed) |
+| 0x18 | 11 | (unnamed) — processor board serial, see below |
+| 0x23 | 2 | deviation |
+| 0x25 | 8 | (unnamed) |
+| 0x2D | 1 | board config (recommended 04) |
 
-The ROMMON cookie editor also prints C1700-specific hints, which complete
-the layout: byte 0x09 NVRAM size (32K = 00), 0x0A CPU speed (50 MHz = 01),
-0x0C-0D on-board PM ID (1720: 00 B2), 0x0E-0F MAC addresses allocated,
-0x23-24 deviation, 0x2D board config (04). The emulator's default cookie
-uses these recommended values.
+**The serial** ("Processor board ID" in IOS's `show version`) is a Cisco
+serial `LLLYYWWSSSS` (plant, year, week, unit) packed into 9 bytes at 0x18:
+3 characters, YY and WW as one byte each, 4 characters. IOS 12.4(8)
+rebuilds it at 0x8012377c, copying alphanumeric bytes 0x18–0x1A,
+`sprintf("%02x")` of 0x1B and 0x1C, bytes 0x1D–0x20, then appends
+`" (%lu)"`, a number computed from that string. Dynamips' default cookie
+has `46 54 58 09 45 57 30 4D 59` there, i.e. "FTX0945W0MY". The emulator
+writes `EMU1234C170` into a fresh cookie; `--serial` sets another one.
+
+*Correction:* an earlier version of this table listed "interfaces" at 0x00,
+a BCD serial at 0x10 and a "cookie version" at 0x1F. That was a generic
+Cisco cookie layout, not this ROM's table. IOS showed the consequence:
+`Processor board ID 0000 (1314672220)`, built from empty bytes.
 
 **CPLD registers known so far**
 

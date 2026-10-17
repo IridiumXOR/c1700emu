@@ -28,6 +28,7 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--nvram PATH` | NVRAM file, created if missing, saved every 2 s and on exit |
 | `--flash PATH` | flash image file (default `c1700-flash.bin`): loaded at start, guest writes saved back |
 | `--model M` | chassis 1720 (default), 1721, 1750, 1751, 1760: sets the cookie's mainboard PM ID (chapter 11) |
+| `--serial S` | processor board serial in the cookie, Cisco format `LLLYYWWSSSS` (default for a new NVRAM `EMU1234C170`; chapter 4) |
 | `--flash-size MB` | internal flash: 4 (2 × AMD Am29F016), 8, 16, 32 (Intel 28F640J3/28F128J3 x16); default 32 for 1751/1760, else 16 |
 | `--flash-file FILE` | (repeatable) build a fresh flash file system with these files, saved to `--flash`; confreg 0x2102 boots the first |
 | `--tftp-root DIR` | serve DIR over TFTP on the virtual network (for `tftpdnld`) |
@@ -38,6 +39,8 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--board-id N` | CPLD board-type strap |
 | `--confreg HEX` | set the configuration register in NVRAM |
 | `--tcp PORT` | also serve the console on telnet |
+| `--aux-tcp PORT` | serve the AUX port (DUART channel B) on telnet; without it AUX output goes to the log |
+| `--watch START:LEN` | (hex) log every bus access to a physical range with the PC, or `DMA` — a watchpoint (chapter 13) |
 | `--no-stdio` | don't use the terminal (TCP only) |
 | `--gdb PORT` | wait for GDB before the first instruction |
 | `-n N` | stop after N instructions |
@@ -157,7 +160,7 @@ a test image). Frame-level logging: `RUST_LOG=c1700emu::net=debug --log net.log`
 
 ## 7.7 Known limitations / next steps
 
-* The virtual network only offers ARP, ping and a read-only TFTP server
+* The virtual network only offers ARP, ping (since chapter 13) and a read-only TFTP server
   (no bridging to the host network).
 * No MMU emulation (identity mapping): fine for ROMMON, and enough for IOS
   12.3(11)T2 to boot to its setup dialog (chapter 9), but not guaranteed for

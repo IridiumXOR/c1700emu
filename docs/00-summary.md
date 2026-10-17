@@ -23,7 +23,8 @@ chapter with the full story.
 | CPU verified against QEMU (100 000 random instruction sequences) | ✅ |
 | Real IOS 12.3(11)T2: `tftpdnld -r` → self-decompress → IOS setup dialog | ✅ ~6.5 min ([chapter 9](09-ios-images.md)) |
 | Real IOS 12.4(8) on a 1760, from internal flash → `Router>`; `show version/interfaces/diag/flash:` | ✅ ~4.8 min ([chapter 10](10-ios-roadmap.md)); FastEthernet0/0 detected, link up |
-| Proper 8xx MMU emulation | ❌ identity mapping only (was enough for the IOS boot) |
+| IOS networking: ARP + `ping 10.0.2.2` from IOS to the virtual host | ✅ `.!!!!` ([chapter 13](13-ios-networking.md)): FEC + IDMA + MMU |
+| 8xx MMU (ITLB/DTLB, table-walk assist, protection, TLB exceptions) | ✅ IOS boots with translation on ([chapter 12](12-mmu.md)) |
 | Network bridge to the real LAN | ❌ only the built-in virtual network |
 
 ## 2. Quick start
@@ -247,10 +248,10 @@ private `c1700emu-roms` repository, see §2).
 
 ## 9. Next steps
 
-* **IOS**: traffic through FastEthernet0/0 (ping/telnet into the router),
+* **IOS**: reach the router from the host (bridge/port forward, telnet in),
   the slot registers (0x68030000/40000/80000/B0000) and WIC cards (SCC/HDLC),
-  the remaining small inaccuracies (board serial format, 5 machine checks),
-  a real 8xx MMU, and snapshots to skip the ~5-minute boot
+  the remaining small inaccuracies (5 machine checks),
+  and snapshots to skip the ~5-minute boot
   ([chapter 10](10-ios-roadmap.md)).
 * **Bridge to the host network** (e.g. UDP NAT) to TFTP from a real server.
 * **Interpreter speed**: a fast path for instruction fetch.
@@ -272,3 +273,5 @@ private `c1700emu-roms` repository, see §2).
 | 9 | [Checking IOS images](09-ios-images.md) |
 | 10 | [Towards full IOS emulation](10-ios-roadmap.md) |
 | 11 | [Internal flash & router model](11-internal-flash-and-models.md) |
+| 12 | [The MPC8xx MMU](12-mmu.md) |
+| 13 | [IOS networking](13-ios-networking.md) |
