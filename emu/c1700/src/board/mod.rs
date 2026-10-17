@@ -32,6 +32,7 @@ use crate::mpc860::Mpc860;
 use crate::net::{NetConfig, VirtualNetwork};
 use flash::Flash;
 use iobus::IoBus;
+use ppc8xx::jit::CodeWatch;
 use ppc8xx::{BusError, Platform, spr};
 
 /// Address decoding granularity: ORx.AM compares address bits 0..16, so no
@@ -40,6 +41,12 @@ const PAGE_SHIFT: u32 = 15;
 const PAGE_SIZE: u32 = 1 << PAGE_SHIFT;
 const PAGE_MASK: u32 = PAGE_SIZE - 1;
 const NUM_PAGES: usize = 1 << (32 - PAGE_SHIFT);
+
+/// Host page numbers for the JIT's code watch (docs ch. 17): 4 KB page `p`
+/// of DRAM bank `b` is `b * DRAM_PAGES + p`, ROM page `p` is
+/// `4 * DRAM_PAGES + p`. Aliases of the same memory get the same number.
+const DRAM_PAGES: u32 = 1 << 16; // up to 256 MB per bank
+const ROM_PAGES_BASE: u32 = 4 * DRAM_PAGES;
 
 /// What a 32 KB page of the physical address space is connected to.
 /// `base` is the offset, inside the device, of the first byte of the page.
@@ -98,6 +105,9 @@ pub struct Board {
     pub watch: Option<Watch>,
     /// An IDMA transfer is in progress (its writes may re-enter `run_cpm`).
     idma_busy: bool,
+    /// Pages holding JIT-translated code; every write to DRAM (CPU, DMA,
+    /// debugger, accelerators) is checked against it.
+    code: CodeWatch,
 }
 
 /// A physical address range whose accesses are logged, like a watchpoint.
@@ -144,6 +154,7 @@ impl Board {
             last_net_poll: 0,
             watch: None,
             idma_busy: false,
+            code: CodeWatch::new(),
         }
     }
 
@@ -282,6 +293,13 @@ impl Board {
     // on devices (reading the UART must not eat a received character).
     // ------------------------------------------------------------------
 
+    /// A DRAM byte at `offset` in `bank` is about to change: tell the JIT
+    /// if it holds translated code (one test when nothing is translated).
+    #[inline]
+    fn note_dram_write(&mut self, bank: u8, offset: u32) {
+        self.code.note_write(bank as u32 * DRAM_PAGES + (offset >> 12));
+    }
+
     pub fn peek8(&mut self, addr: u32) -> Option<u8> {
         match self.region(addr) {
             Region::Rom { base } => Some(self.rom[(base + (addr & PAGE_MASK)) as usize]),
@@ -318,6 +336,9 @@ impl Board {
             a += n;
         }
         for (bank, off, n) in chunks {
+            let first = bank as u32 * DRAM_PAGES + (off >> 12) as u32;
+            let last = bank as u32 * DRAM_PAGES + ((off + n - 1) >> 12) as u32;
+            self.code.note_range(first, last);
             self.dram[bank][off..off + n].fill(value);
         }
         true
@@ -326,11 +347,13 @@ impl Board {
     pub fn poke8(&mut self, addr: u32, value: u8) -> bool {
         match self.region(addr) {
             Region::Dram { bank, base } => {
+                self.note_dram_write(bank, base + (addr & PAGE_MASK));
                 self.dram[bank as usize][(base + (addr & PAGE_MASK)) as usize] = value;
                 true
             }
             // Let debuggers patch the ROM image in memory (handy for experiments).
             Region::Rom { base } => {
+                self.code.note_write(ROM_PAGES_BASE + ((base + (addr & PAGE_MASK)) >> 12));
                 self.rom[(base + (addr & PAGE_MASK)) as usize] = value;
                 true
             }
@@ -440,7 +463,10 @@ impl Board {
         }
         let low = addr & PAGE_MASK;
         match self.region(addr) {
-            Region::Dram { bank, base } => self.dram[bank as usize][(base + low) as usize] = value,
+            Region::Dram { bank, base } => {
+                self.note_dram_write(bank, base + low);
+                self.dram[bank as usize][(base + low) as usize] = value;
+            }
             Region::Rom { .. } | Region::EmptyBank => {}
             Region::Immr => {
                 self.mpc.write8(addr - self.mpc.isb(), value);
@@ -464,7 +490,10 @@ impl Board {
         }
         let low = addr & PAGE_MASK;
         match self.region(addr) {
-            Region::Dram { bank, base } => put16(&mut self.dram[bank as usize], base + low, value),
+            Region::Dram { bank, base } => {
+                self.note_dram_write(bank, base + low);
+                put16(&mut self.dram[bank as usize], base + low, value);
+            }
             Region::Rom { .. } | Region::EmptyBank => {}
             Region::Immr => {
                 self.mpc.write16(addr - self.mpc.isb(), value);
@@ -489,7 +518,10 @@ impl Board {
         }
         let low = addr & PAGE_MASK;
         match self.region(addr) {
-            Region::Dram { bank, base } => put32(&mut self.dram[bank as usize], base + low, value),
+            Region::Dram { bank, base } => {
+                self.note_dram_write(bank, base + low);
+                put32(&mut self.dram[bank as usize], base + low, value);
+            }
             Region::Rom { .. } | Region::EmptyBank => {}
             Region::Immr => {
                 self.mpc.write32(addr - self.mpc.isb(), value);
@@ -552,6 +584,7 @@ impl Platform for Board {
     fn write8(&mut self, addr: u32, value: u8) -> Result<(), BusError> {
         if self.watch.is_none() {
             if let Region::Dram { bank, base } = self.region(addr) {
+                self.note_dram_write(bank, base + (addr & PAGE_MASK));
                 self.dram[bank as usize][(base + (addr & PAGE_MASK)) as usize] = value;
                 return Ok(());
             }
@@ -563,6 +596,7 @@ impl Platform for Board {
     fn write16(&mut self, addr: u32, value: u16) -> Result<(), BusError> {
         if self.watch.is_none() {
             if let Region::Dram { bank, base } = self.region(addr) {
+                self.note_dram_write(bank, base + (addr & PAGE_MASK));
                 put16(&mut self.dram[bank as usize], base + (addr & PAGE_MASK), value);
                 return Ok(());
             }
@@ -574,6 +608,7 @@ impl Platform for Board {
     fn write32(&mut self, addr: u32, value: u32) -> Result<(), BusError> {
         if self.watch.is_none() {
             if let Region::Dram { bank, base } = self.region(addr) {
+                self.note_dram_write(bank, base + (addr & PAGE_MASK));
                 put32(&mut self.dram[bank as usize], base + (addr & PAGE_MASK), value);
                 return Ok(());
             }
@@ -594,6 +629,50 @@ impl Platform for Board {
 
     fn read_spr(&mut self, n: u16) -> Option<u32> {
         (n == spr::IMMR).then_some(self.mpc.immr)
+    }
+
+    // JIT support (docs ch. 17): plain DRAM and ROM can be accessed
+    // directly and hold translated code; everything else goes through the
+    // normal accessors.
+
+    fn host_page(&mut self, pa: u32, write: bool) -> Option<*mut u8> {
+        if self.watch.is_some() {
+            return None; // every access must be seen and logged
+        }
+        let page_offset = pa & PAGE_MASK & !0xFFF;
+        match self.region(pa) {
+            Region::Dram { bank, base } => {
+                let offset = base + page_offset;
+                if write && self.code.is_watched(bank as u32 * DRAM_PAGES + (offset >> 12)) {
+                    return None;
+                }
+                Some(self.dram[bank as usize][offset as usize..].as_mut_ptr())
+            }
+            Region::Rom { base } if !write => Some(self.rom[(base + page_offset) as usize..].as_mut_ptr()),
+            _ => None,
+        }
+    }
+
+    fn memory_map_epoch(&self) -> u64 {
+        self.mpc.map_epoch
+    }
+
+    fn watch_code_page(&mut self, pa: u32) -> Option<u32> {
+        let page = match self.region(pa) {
+            Region::Dram { bank, base } => bank as u32 * DRAM_PAGES + ((base + (pa & PAGE_MASK)) >> 12),
+            Region::Rom { base } => ROM_PAGES_BASE + ((base + (pa & PAGE_MASK)) >> 12),
+            _ => return None,
+        };
+        self.code.watch(page);
+        Some(page)
+    }
+
+    fn take_code_write(&mut self) -> Option<u32> {
+        self.code.take()
+    }
+
+    fn unwatch_code_pages(&mut self) {
+        self.code.clear();
     }
 
     fn write_spr(&mut self, n: u16, value: u32) -> bool {

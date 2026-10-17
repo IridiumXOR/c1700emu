@@ -25,6 +25,7 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 14 | [Speed and JIT](14-speed-and-jit.md) | where an interpreter spends its time, how a JIT works, what it would take here, the plan |
 | 15 | [Profiling and idle detection](15-profiling-and-idle.md) | guest and host profiles, how IOS idles, the idle-PC detector, results |
 | 16 | [Making the interpreter faster](16-interpreter-optimisations.md) | the benchmark, each optimisation with its measured effect, exact ROM accelerators, what is left |
+| 17 | [A JIT compiler](17-jit.md) | `--cpu jit`: Cranelift translation of hot blocks, exactness rules, self-modifying code, verification (incl. mutation testing), results |
 
 Reference material:
 

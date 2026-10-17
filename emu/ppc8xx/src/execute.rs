@@ -849,11 +849,11 @@ impl Cpu {
     // aligned half/word never crosses a page, a misaligned one is split into
     // bytes that are translated one by one.
 
-    fn load8<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u8, Exception> {
+    pub(crate) fn load8<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u8, Exception> {
         let pa = self.data_address(ea, MemAccess::Load)?;
         sys.read8(pa).map_err(|BusError| machine_check(ea))
     }
-    fn load16<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u16, Exception> {
+    pub(crate) fn load16<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u16, Exception> {
         if ea & 1 == 0 {
             let pa = self.data_address(ea, MemAccess::Load)?;
             return sys.read16(pa).map_err(|BusError| machine_check(ea));
@@ -862,7 +862,7 @@ impl Cpu {
         let lo = self.load8(sys, ea.wrapping_add(1))?;
         Ok(u16::from_be_bytes([hi, lo]))
     }
-    fn load32<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u32, Exception> {
+    pub(crate) fn load32<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u32, Exception> {
         if ea & 3 == 0 {
             let pa = self.data_address(ea, MemAccess::Load)?;
             return sys.read32(pa).map_err(|BusError| machine_check(ea));
@@ -873,11 +873,11 @@ impl Cpu {
         }
         Ok(u32::from_be_bytes(b))
     }
-    fn store8<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u8) -> Result<(), Exception> {
+    pub(crate) fn store8<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u8) -> Result<(), Exception> {
         let pa = self.data_address(ea, MemAccess::Store)?;
         sys.write8(pa, v).map_err(|BusError| machine_check(ea))
     }
-    fn store16<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u16) -> Result<(), Exception> {
+    pub(crate) fn store16<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u16) -> Result<(), Exception> {
         if ea & 1 == 0 {
             let pa = self.data_address(ea, MemAccess::Store)?;
             return sys.write16(pa, v).map_err(|BusError| machine_check(ea));
@@ -886,7 +886,7 @@ impl Cpu {
         self.store8(sys, ea, hi)?;
         self.store8(sys, ea.wrapping_add(1), lo)
     }
-    fn store32<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u32) -> Result<(), Exception> {
+    pub(crate) fn store32<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u32) -> Result<(), Exception> {
         if ea & 3 == 0 {
             let pa = self.data_address(ea, MemAccess::Store)?;
             return sys.write32(pa, v).map_err(|BusError| machine_check(ea));
@@ -931,7 +931,7 @@ fn add3(a: u32, b: u32, carry_in: u32) -> (u32, bool, bool) {
 /// (bit 0 = MSB). When `mb > me` the run of ones wraps around, e.g.
 /// MASK(30, 1) = 0xC000_0003.
 #[inline]
-fn mask(mb: u8, me: u8) -> u32 {
+pub(crate) fn mask(mb: u8, me: u8) -> u32 {
     let from_mb = u32::MAX >> mb; // bits mb..31
     let to_me = u32::MAX << (31 - me); // bits 0..me
     if mb <= me { from_mb & to_me } else { from_mb | to_me }

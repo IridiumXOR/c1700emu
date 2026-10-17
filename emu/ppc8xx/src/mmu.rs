@@ -179,11 +179,14 @@ struct FastEntry {
 #[derive(Clone)]
 struct FastCache {
     entries: Box<[FastEntry; 256]>,
+    /// Number of flushes: any change that can alter a translation flushes,
+    /// so the JIT's copies stay valid while this doesn't move.
+    flushes: u64,
 }
 
 impl FastCache {
     fn new() -> Self {
-        FastCache { entries: Box::new([FastEntry::default(); 256]) }
+        FastCache { entries: Box::new([FastEntry::default(); 256]), flushes: 0 }
     }
     #[inline]
     fn lookup(&self, ea: u32, need: u8) -> Option<u32> {
@@ -195,6 +198,7 @@ impl FastCache {
     }
     fn flush(&mut self) {
         self.entries.fill(FastEntry::default());
+        self.flushes += 1;
     }
 }
 
@@ -421,6 +425,18 @@ impl Mmu {
     /// hardware does before the exception (§8.10.1).
     #[inline]
     pub fn translate(&mut self, ea: u32, access: Access, user: bool) -> Result<u32, Fault> {
+        if let Some(pa) = self.cached(ea, access, user) {
+            return Ok(pa);
+        }
+        self.translate_slow(ea, access, user)
+    }
+
+    /// The translation of `ea` if it is in the fast cache. An entry there
+    /// means the whole 4 KB granule around `ea` translates the same way with
+    /// the same permission (no 1 KB sub-page differences), until
+    /// [`Mmu::data_generation`] (or, for fetches, the next TLB change) moves.
+    #[inline]
+    pub fn cached(&self, ea: u32, access: Access, user: bool) -> Option<u32> {
         let need = match (access, user) {
             (Access::Fetch, false) => P_SUP_EXEC,
             (Access::Fetch, true) => P_USER_EXEC,
@@ -430,10 +446,13 @@ impl Mmu {
             (Access::Store, true) => P_USER_WRITE,
         };
         let tlb = if access == Access::Fetch { &self.itlb } else { &self.dtlb };
-        if let Some(pa) = tlb.fast.lookup(ea, need) {
-            return Ok(pa);
-        }
-        self.translate_slow(ea, access, user)
+        tlb.fast.lookup(ea, need)
+    }
+
+    /// Changes whenever a data translation may have changed (TLB load or
+    /// invalidation, protection or address-space registers).
+    pub fn data_generation(&self) -> u64 {
+        self.dtlb.fast.flushes
     }
 
     fn translate_slow(&mut self, ea: u32, access: Access, user: bool) -> Result<u32, Fault> {

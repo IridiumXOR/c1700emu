@@ -35,6 +35,8 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--net-server-ip`, `--net-gateway`, `--net-prefix` | virtual network addresses (default 10.0.2.2, 10.0.2.1, /24) |
 | `--no-net` | leave the Ethernet port unplugged |
 | `--no-fast-forward` | execute the ROM's delay loops instead of skipping them |
+| `--cpu interp\|jit` | CPU engine: the interpreter (default, the reference) or the JIT (chapter 17) |
+| `--jit-threshold N` | JIT: times a block runs interpreted before it is translated (default 50) |
 | `--ram MB` | SDRAM size, split into power-of-two banks (default 32) |
 | `--board-id N` | CPLD board-type strap |
 | `--confreg HEX` | set the configuration register in NVRAM |

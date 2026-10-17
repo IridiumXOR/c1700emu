@@ -28,12 +28,20 @@
 //! garbage bits, `lmw` (would clobber r29-r31), traps and privileged
 //! instructions (we run in user mode, like QEMU).
 //!
-//! Environment knobs: `QEMU_DIFF_SEQUENCES` (default 400), `QEMU_DIFF_SEED`.
+//! The same batches also check the JIT (`ppc8xx::jit`, docs chapter 17):
+//! with a translation threshold of 1 every block is translated the first
+//! time it runs, so the JIT must give the same output as QEMU, and
+//! `jit_matches_interpreter` compares it with the interpreter on more
+//! sequences (without needing QEMU).
+//!
+//! Environment knobs: `QEMU_DIFF_SEQUENCES` (default 400), `QEMU_DIFF_SEED`,
+//! `JIT_DIFF_SEQUENCES` (default 3000).
 
 mod common;
 
 use common::asm;
 use object::{Object, ObjectSegment};
+use ppc8xx::jit::{CodeWatch, Jit};
 use ppc8xx::{BusError, Cpu, Platform, msr};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -68,12 +76,43 @@ fn qemu_differential() {
         let batch = Batch::generate(&mut rng, n);
         let elf = batch.build(&workdir, batch_no);
         let expected = run_qemu(&elf);
-        let actual = run_ours(&elf);
-        batch.compare(&expected, &actual, seed, batch_no);
+        let actual = run_ours(&elf, Engine::Interpreter);
+        batch.compare(&expected, &actual, seed, batch_no, "qemu", "ours");
+        let jit = run_ours(&elf, Engine::Jit);
+        batch.compare(&expected, &jit, seed, batch_no, "qemu", "JIT");
         done += n;
         batch_no += 1;
     }
-    eprintln!("qemu differential: {done} sequences OK (seed {seed:#x})");
+    eprintln!("qemu differential: {done} sequences OK, interpreter and JIT (seed {seed:#x})");
+}
+
+/// The JIT against the interpreter on the same random sequences.
+#[test]
+fn jit_matches_interpreter() {
+    let tools = ["llvm-mc", "ld.lld"];
+    if let Some(missing) = tools.iter().find(|t| which(t).is_none()) {
+        eprintln!("SKIPPING JIT differential test: `{missing}` not found in PATH");
+        return;
+    }
+    let total: usize = env_or("JIT_DIFF_SEQUENCES", 3000);
+    let seed: u64 = env_or("QEMU_DIFF_SEED", 0x0860_1700) ^ 0x717;
+    let workdir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("jit_diff");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let mut rng = fastrand::Rng::with_seed(seed);
+    let mut done = 0;
+    let mut batch_no = 0;
+    while done < total {
+        let n = BATCH.min(total - done);
+        let batch = Batch::generate(&mut rng, n);
+        let elf = batch.build(&workdir, batch_no);
+        let expected = run_ours(&elf, Engine::Interpreter);
+        let actual = run_ours(&elf, Engine::Jit);
+        batch.compare(&expected, &actual, seed, batch_no, "interpreter", "JIT");
+        done += n;
+        batch_no += 1;
+    }
+    eprintln!("JIT differential: {done} sequences OK (seed {seed:#x})");
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +175,7 @@ impl Batch {
         elf
     }
 
-    fn compare(&self, expected: &[u8], actual: &[u8], seed: u64, batch_no: usize) {
+    fn compare(&self, expected: &[u8], actual: &[u8], seed: u64, batch_no: usize, them: &str, us: &str) {
         if expected == actual {
             return;
         }
@@ -147,7 +186,7 @@ impl Batch {
             })
             .unwrap();
         let mut report = format!(
-            "MISMATCH vs qemu: seed {seed:#x}, batch {batch_no}, sequence {index}\n(qemu output {} bytes, ours {} bytes)\n",
+            "MISMATCH {us} vs {them}: seed {seed:#x}, batch {batch_no}, sequence {index}\n({them} output {} bytes, {us} {} bytes)\n",
             expected.len(),
             actual.len()
         );
@@ -157,7 +196,7 @@ impl Batch {
         let chunk = |buf: &[u8]| buf.get(index * CHUNK..(index + 1) * CHUNK).map(<[u8]>::to_vec);
         match (chunk(expected), chunk(actual)) {
             (Some(e), Some(a)) => {
-                report += "register differences (name: qemu vs ours):\n";
+                report += &format!("register differences (name: {them} vs {us}):\n");
                 for (k, name) in dump_names().iter().enumerate() {
                     let ev = u32::from_be_bytes(e[4 * k..4 * k + 4].try_into().unwrap());
                     let av = u32::from_be_bytes(a[4 * k..4 * k + 4].try_into().unwrap());
@@ -461,6 +500,8 @@ struct LinuxUser {
     mem: Vec<u8>,
     stdout: Vec<u8>,
     exited: bool,
+    /// Pages holding JIT-translated code.
+    code: CodeWatch,
 }
 
 impl LinuxUser {
@@ -489,18 +530,39 @@ impl Platform for LinuxUser {
     }
     fn write8(&mut self, a: u32, v: u8) -> Result<(), BusError> {
         let r = self.range(a, 1)?;
+        self.code.note_write(a >> 12);
         self.mem[r.start] = v;
         Ok(())
     }
     fn write16(&mut self, a: u32, v: u16) -> Result<(), BusError> {
         let r = self.range(a, 2)?;
+        self.code.note_write(a >> 12);
         self.mem[r].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
     fn write32(&mut self, a: u32, v: u32) -> Result<(), BusError> {
         let r = self.range(a, 4)?;
+        self.code.note_write(a >> 12);
         self.mem[r].copy_from_slice(&v.to_be_bytes());
         Ok(())
+    }
+    fn host_page(&mut self, pa: u32, write: bool) -> Option<*mut u8> {
+        let r = self.range(pa & !0xFFF, 0x1000).ok()?;
+        if write && self.code.is_watched(pa >> 12) {
+            return None;
+        }
+        Some(self.mem[r].as_mut_ptr())
+    }
+    fn watch_code_page(&mut self, pa: u32) -> Option<u32> {
+        self.range(pa & !0xFFF, 0x1000).ok()?;
+        self.code.watch(pa >> 12);
+        Some(pa >> 12)
+    }
+    fn take_code_write(&mut self) -> Option<u32> {
+        self.code.take()
+    }
+    fn unwatch_code_pages(&mut self) {
+        self.code.clear();
     }
     /// PowerPC Linux ABI: syscall number in r0, arguments in r3.., result in r3.
     fn system_call(&mut self, cpu: &mut Cpu) -> bool {
@@ -520,10 +582,17 @@ impl Platform for LinuxUser {
     }
 }
 
-fn run_ours(elf: &Path) -> Vec<u8> {
+#[derive(Clone, Copy, PartialEq)]
+enum Engine {
+    Interpreter,
+    /// The JIT, translating every block the first time it runs.
+    Jit,
+}
+
+fn run_ours(elf: &Path, engine: Engine) -> Vec<u8> {
     let data = std::fs::read(elf).unwrap();
     let file = object::File::parse(&*data).unwrap();
-    let mut os = LinuxUser { base: TEXT_BASE, mem: vec![0; 0x20_0000], stdout: Vec::new(), exited: false };
+    let mut os = LinuxUser { base: TEXT_BASE, mem: vec![0; 0x20_0000], stdout: Vec::new(), exited: false, code: CodeWatch::new() };
     // Load segments in program-header order (later ones win where they overlap).
     for seg in file.segments() {
         let start = (seg.address() as u32 - TEXT_BASE) as usize;
@@ -535,6 +604,18 @@ fn run_ours(elf: &Path) -> Vec<u8> {
     cpu.msr = msr::PR | msr::ME | msr::EE;
     cpu.pc = file.entry() as u32;
 
+    if engine == Engine::Jit {
+        let mut jit = Jit::with_threshold(1);
+        let mut steps = 0u64;
+        while !os.exited {
+            let (n, _) = jit.run_batch(&mut cpu, &mut os, 256, |_| false);
+            steps += n;
+            // (After exit() the batch runs on into whatever follows: ignore it.)
+            assert!(os.exited || cpu.pc >= 0x2000, "the JIT run took exception vector {:#x}; SRR0={:#x} SRR1={:#x}", cpu.pc, cpu.srr0, cpu.srr1);
+            assert!(steps < 50_000_000, "runaway execution");
+        }
+        return os.stdout;
+    }
     let mut steps = 0u64;
     while !os.exited {
         let pc = cpu.pc;

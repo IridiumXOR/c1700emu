@@ -4,7 +4,8 @@ The emulator runs IOS at about **23 million instructions per second**, about
 half the speed of a real 48 MHz MPC860, so IOS needs ~5 minutes to reach
 `Router>`. This chapter explains why, what a JIT (just-in-time compiler)
 is and how one would work for *this* emulator, and the plan I'd follow,
-cheaper steps first. Nothing in this chapter is implemented yet.
+cheaper steps first. The steps were then carried out: chapters 15 and 16
+(profiling, idle detection, interpreter work) and chapter 17 (the JIT).
 
 ## 14.1 What one emulated instruction costs today
 
@@ -150,11 +151,13 @@ The bigger wins for the *experience* of using the emulator aren't the JIT:
 3. **IOS idle detection**: recognise the idle loop and advance virtual time
    to the next timer interrupt. **Done** (chapter 15): boot 318 → 206 s, an
    idle router uses ~0% CPU.
-4. **Pre-decoded blocks** (14.4), 2-3× on top, and the foundation for:
-5. **A Cranelift JIT for hot blocks**, verified in **lockstep**: run each
-   block in both the JIT and the interpreter on a copy of the state and
-   compare registers and memory writes. Plus the existing QEMU differential
-   tests and the IOS boot as the end-to-end test.
+4. **Pre-decoded blocks** (14.4), 2-3× on top. *Skipped*: the block
+   discovery, invalidation and exit machinery they need is the same as
+   for a JIT, so I went straight to:
+5. **A Cranelift JIT for hot blocks**, verified against the interpreter.
+   **Done** (chapter 17): `--cpu jit`, 4.3× the interpreter on the
+   benchmark, checked by JIT-vs-interpreter tests, the random differential
+   tests and an exact ROMMON boot comparison.
 
 Honest expectations: the self-decompressor (tight loops) would gain the
 most, maybe 10×; IOS as a whole less, because device accesses, MMIO and

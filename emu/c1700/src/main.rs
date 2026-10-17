@@ -16,7 +16,7 @@ use c1700emu::board::{BoardConfig, cookie, flashfs, nvram::Nvram};
 use c1700emu::console::Console;
 use c1700emu::emulator::Emulator;
 use c1700emu::gdb;
-use c1700emu::machine::Machine;
+use c1700emu::machine::{CpuEngine, Machine};
 use c1700emu::net::NetConfig;
 use clap::Parser;
 use std::io::Write;
@@ -132,6 +132,15 @@ struct Args {
     /// Log every executed instruction (very slow; use with --log).
     #[arg(long)]
     trace: bool,
+
+    /// CPU engine: `interp` (the interpreter, the reference) or `jit` (hot
+    /// code translated to host machine code with Cranelift). See docs ch. 17.
+    #[arg(long, value_enum, default_value = "interp")]
+    cpu: CpuEngine,
+
+    /// JIT: how many times a block runs interpreted before it is translated.
+    #[arg(long, default_value_t = ppc8xx::jit::DEFAULT_THRESHOLD)]
+    jit_threshold: u32,
 
     /// Execute the ROM's delay loops instruction by instruction instead of
     /// fast-forwarding the virtual clock through them.
@@ -256,6 +265,7 @@ fn main() -> Result<(), String> {
     }
 
     let mut machine = Machine::new(rom, &cfg, nvram);
+    machine.set_engine(args.cpu, args.jit_threshold);
     machine.trace = args.trace;
     if args.no_fast_forward {
         machine.fast_forward = c1700emu::fastforward::FastForward::disabled();

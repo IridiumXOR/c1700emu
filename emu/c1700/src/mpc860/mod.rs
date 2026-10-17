@@ -74,6 +74,8 @@ pub struct Mpc860 {
     pub upm: [[u32; 64]; 2],
     /// Set when BRx/ORx/IMMR change; the board rebuilds its address decoder.
     pub map_dirty: bool,
+    /// Counts those changes (the JIT's direct memory pointers depend on them).
+    pub map_epoch: u64,
     pub pit: Pit,
     /// Level of the external IRQ0..IRQ7 pins (bit n = IRQn asserted).
     pub irq_pins: u8,
@@ -135,6 +137,7 @@ impl Mpc860 {
             mem: Box::new([0; IMMR_POPULATED]),
             upm: [[0; 64]; 2],
             map_dirty: true,
+            map_epoch: 0,
             pit: Pit::default(),
             irq_pins: 0,
             irq_edge_latched: 0,
@@ -175,7 +178,13 @@ impl Mpc860 {
         self.pit = Pit::default();
         self.irq_edge_latched = 0;
         self.fec = Fec::new();
+        self.map_changed();
+    }
+
+    /// The memory map (chip selects or IMMR) changed.
+    fn map_changed(&mut self) {
         self.map_dirty = true;
+        self.map_epoch += 1;
     }
 
     /// Base address of the IMMR window.
@@ -185,8 +194,13 @@ impl Mpc860 {
 
     pub fn set_immr(&mut self, value: u32) {
         // PARTNUM/MASKNUM are read-only.
+        let old_base = self.isb();
         self.immr = (value & 0xFFFF_0000) | PART_AND_MASK;
-        self.map_dirty = true;
+        // The ROM rewrites IMMR with the same value hundreds of times; only
+        // a new base moves the on-chip window.
+        if self.isb() != old_base {
+            self.map_changed();
+        }
     }
 
     /// Chip-select registers for bank `n`: (BRn, ORn).
@@ -540,7 +554,7 @@ impl Mpc860 {
     /// Side effects that only need the stored value.
     fn after_write(&mut self, off: u32) {
         match off {
-            BR0..=OR7 => self.map_dirty = true,
+            BR0..=OR7 => self.map_changed(),
             MCR => self.upm_command(),
             // SPCOM[STR] (start transfer) clears itself after one clock.
             x if x == SPCOM & !3 => {

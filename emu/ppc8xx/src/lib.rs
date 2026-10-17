@@ -20,6 +20,7 @@
 
 mod decode_cache;
 mod execute;
+pub mod jit;
 pub mod mmu;
 
 use decode_cache::DecodeCache;
@@ -72,6 +73,45 @@ pub trait Platform {
     fn system_call(&mut self, _cpu: &mut Cpu) -> bool {
         false
     }
+
+    // ---- JIT support (see the `jit` module). The interpreter never calls
+    // these; the defaults mean "no direct memory access, no translated code",
+    // with which the JIT simply interprets everything. ----
+
+    /// A host pointer to the 4 KB physical page containing `pa`, if the page
+    /// is plain memory: reading (and, for `write`, writing) it directly must
+    /// be exactly equivalent to `read*`/`write*`. For `write`, return `None`
+    /// for pages watched with [`Platform::watch_code_page`], so that stores to
+    /// translated code go through `write*` and get reported.
+    ///
+    /// The pointer must stay valid until [`Platform::memory_map_epoch`]
+    /// changes.
+    fn host_page(&mut self, _pa: u32, _write: bool) -> Option<*mut u8> {
+        None
+    }
+
+    /// Changes whenever an answer of [`Platform::host_page`] may have changed
+    /// (memory controller reprogrammed, access logging switched on...).
+    fn memory_map_epoch(&self) -> u64 {
+        0
+    }
+
+    /// The JIT is about to translate code at physical address `pa`. Return
+    /// an identifier of the host page behind it (aliases of the same memory
+    /// must give the same identifier) if the platform will report every
+    /// later write to that page, by anyone, through
+    /// [`Platform::take_code_write`]. `None`: don't translate code there.
+    fn watch_code_page(&mut self, _pa: u32) -> Option<u32> {
+        None
+    }
+
+    /// Next watched page written since the last call (its watch ends).
+    fn take_code_write(&mut self) -> Option<u32> {
+        None
+    }
+
+    /// Forget all watched pages (the JIT threw its translations away).
+    fn unwatch_code_pages(&mut self) {}
 }
 
 /// Machine State Register bits (MPC860UM Table 4-?/§4.1.2.1, PEM ch. 2).
@@ -447,6 +487,43 @@ impl Cpu {
     /// (`None` if it already did, or never will without wrapping around).
     pub fn ticks_until_decrementer(&self) -> Option<u64> {
         (!self.dec_pending && self.dec & 0x8000_0000 == 0).then_some(self.dec as u64 + 1)
+    }
+
+    /// Exactly the effect of `n` calls to `tick()` (the clock after `n`
+    /// executed instructions), in one go. Used by the JIT, which runs a
+    /// whole block and then lets its time pass.
+    pub(crate) fn advance_clock(&mut self, n: u64) {
+        self.cycles += n;
+        if !self.tb_enabled {
+            return;
+        }
+        let total = self.tb_prescaler as u64 + n;
+        let ticks = total / self.tb_divider as u64;
+        self.tb_prescaler = (total % self.tb_divider as u64) as u32;
+        if ticks == 0 {
+            return;
+        }
+        self.tb = self.tb.wrapping_add(ticks);
+        let old = self.dec;
+        self.dec = self.dec.wrapping_sub(ticks as u32);
+        // One tick at a time, the request happens on each 0 -> 0xFFFF_FFFF
+        // step; `ticks` steps from `old` pass through it iff ticks > old.
+        if ticks > old as u64 {
+            self.dec_pending = true;
+        }
+    }
+
+    /// How many instructions can execute before the one whose `tick()` sets
+    /// `dec_pending` (that one included): the JIT only runs a block of `n`
+    /// instructions with `MSR[EE]=1` if this is at least `n`, so the
+    /// decrementer interrupt can't fall inside the block.
+    pub(crate) fn instructions_until_decrementer_request(&self) -> u64 {
+        if !self.tb_enabled {
+            return u64::MAX;
+        }
+        let div = self.tb_divider as u64;
+        let first_tick = div.saturating_sub(self.tb_prescaler as u64).max(1); // instructions until the next tick
+        first_tick + self.dec as u64 * div // the (dec+1)-th tick takes DEC from 0 to -1
     }
 
     /// Exception entry, as described in MPC860UM chapter 6:

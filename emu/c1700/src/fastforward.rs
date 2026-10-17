@@ -167,6 +167,13 @@ impl FastForward {
         cycles
     }
 
+    /// Is `pc` an address where [`FastForward::try_skip`] or the memory
+    /// clear can act? (The machine single-steps exactly these.)
+    #[inline]
+    pub fn is_hook(&self, pc: u32) -> bool {
+        self.is_bzero(pc) || (self.enabled && LOOPS.iter().any(|l| l.pc == pc))
+    }
+
     /// Cheap test done before every instruction.
     #[inline]
     pub fn is_candidate(&self, pc: u32) -> bool {

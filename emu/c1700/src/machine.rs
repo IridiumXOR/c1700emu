@@ -10,6 +10,7 @@ use crate::fastforward::FastForward;
 use crate::idle::{Idle, IdleMode};
 use crate::mpc860::rsr;
 use powerpc::{Extensions, Ins};
+use ppc8xx::jit::Jit;
 use ppc8xx::{BatchEnd, Cpu, Platform, StepOutcome, msr};
 use std::collections::{BTreeSet, HashMap};
 
@@ -18,6 +19,15 @@ pub const DEVICE_SYNC_INTERVAL: u64 = 256;
 
 /// PLPRCR[CSR]: checkstop reset enable.
 const PLPRCR_CSR: u32 = 0x0000_0080;
+
+/// How the CPU's instructions are executed (`--cpu`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum CpuEngine {
+    /// The interpreter: the reference implementation.
+    Interp,
+    /// The JIT: hot code translated to host machine code (docs ch. 17).
+    Jit,
+}
 
 /// What [`Machine::run`] does after the per-address hooks.
 enum Hook {
@@ -65,6 +75,10 @@ pub struct Machine {
     pub idle_auto: bool,
     /// Realtime pacing: stop a `run` once `cpu.cycles` passes this.
     pub pace_limit: Option<u64>,
+    /// `--cpu jit`: the JIT runs the batches instead of the interpreter.
+    /// (Breakpoints, tracing, profiling and `--watch` still single-step
+    /// through the interpreter.)
+    pub jit: Option<Box<Jit>>,
 }
 
 /// One PC sample every this many instructions. A prime, so the sampling
@@ -92,6 +106,7 @@ impl Machine {
             idle: Idle::new(IdleMode::Off, None),
             idle_auto: false,
             pace_limit: None,
+            jit: None,
         };
         m.power_on();
         m.fast_forward = FastForward::new(|a| m.board.peek_word(a));
@@ -104,7 +119,20 @@ impl Machine {
         self.cpu = Cpu::new();
         self.cpu.hard_reset(true); // hard reset config word: IP=1 → boot at 0xFFF00100
         self.idle.reset(self.idle_auto);
+        self.flush_jit();
         self.sync_devices();
+    }
+
+    /// Select the CPU engine.
+    pub fn set_engine(&mut self, engine: CpuEngine, jit_threshold: u32) {
+        self.jit = (engine == CpuEngine::Jit).then(|| Box::new(Jit::with_threshold(jit_threshold)));
+    }
+
+    /// The CPU state was replaced: translations made for the old one go.
+    fn flush_jit(&mut self) {
+        if let Some(jit) = &mut self.jit {
+            jit.flush(&mut self.board);
+        }
     }
 
     /// Internal hard reset (checkstop reset, watchdog...). RAM survives.
@@ -118,6 +146,7 @@ impl Machine {
         self.cpu.tb = tb;
         self.cpu.cycles = cycles;
         self.idle.reset(self.idle_auto);
+        self.flush_jit();
         self.sync_devices();
     }
 
@@ -130,12 +159,12 @@ impl Machine {
         let check_bp = !self.breakpoints.is_empty();
         // Breakpoints, trace, profile and watch need a look at every
         // instruction; the other hooks live at a few known addresses, so an
-        // ordinary instruction only pays for one page test (`is_hook_page`).
+        // ordinary instruction only pays for a page test (`is_hook`).
         let slow = check_bp || self.trace || self.profile.is_some() || self.board.watch.is_some();
         let mut done = 0;
         while done < budget {
             let pc = self.cpu.pc;
-            if slow || self.is_hook_page(pc) {
+            if slow || is_hook(&self.fast_forward, &self.idle, pc) {
                 // One instruction at a time, with the per-address hooks.
                 match self.before_step(pc, check_bp && !(done == 0 && ignore_breakpoint_at_start)) {
                     Hook::Run => {}
@@ -158,10 +187,14 @@ impl Machine {
                 }
             } else {
                 // Fast path: a batch until the next device sync, a hook page
-                // or a checkstop, with the core's step inlined.
+                // or a checkstop, by the interpreter (step inlined) or the JIT.
                 let max = (DEVICE_SYNC_INTERVAL.saturating_sub(self.unsynced)).max(1).min(budget - done);
-                let hook_pages = &self.idle.hook_pages;
-                let (n, end) = self.cpu.run_batch(&mut self.board, max, |pc| is_hook_page(hook_pages, pc));
+                let (n, end) = if self.jit.is_some() {
+                    self.jit_batch(max)
+                } else {
+                    let (ff, idle) = (&self.fast_forward, &self.idle);
+                    self.cpu.run_batch(&mut self.board, max, |pc| is_hook(ff, idle, pc))
+                };
                 done += n;
                 self.unsynced += n;
                 if end == BatchEnd::Checkstop {
@@ -177,9 +210,14 @@ impl Machine {
         StopReason::Budget
     }
 
-    #[inline(always)]
-    fn is_hook_page(&self, pc: u32) -> bool {
-        is_hook_page(&self.idle.hook_pages, pc)
+    /// [`Machine::run`]'s batch with the JIT. A separate function, kept out
+    /// of `run`: next to the interpreter's inlined loop it made the
+    /// interpreter 4% slower even when not used (measured).
+    #[inline(never)]
+    fn jit_batch(&mut self, max: u64) -> (u64, BatchEnd) {
+        let (ff, idle) = (&self.fast_forward, &self.idle);
+        let jit = self.jit.as_mut().expect("JIT engine selected");
+        jit.run_batch(&mut self.cpu, &mut self.board, max, |pc| is_hook(ff, idle, pc))
     }
 
     /// The per-instruction hooks, run before executing the instruction at `pc`.
@@ -376,6 +414,9 @@ impl Machine {
         if self.idle.anchor.is_some() {
             out += &self.idle.report();
         }
+        if let Some(jit) = &self.jit {
+            out += &jit.report();
+        }
         for &pc in &self.cpu.soft_emulation_pcs.clone() {
             let w = self.peek_word(pc).unwrap_or(0);
             let ins = Ins::new(w, Extensions::none());
@@ -525,10 +566,15 @@ fn sample_report(title: &str, samples: &HashMap<u32, u64>) -> String {
     out
 }
 
-/// Pages (4 KB) holding a per-address hook: the ROM's delay loops and memory
-/// clear, and the idle anchor (or auto-mode candidates).
+/// Is there a per-address hook at `pc`: one of the ROM's delay loops or its
+/// memory clear (when the accelerators are on), the idle anchor or an
+/// auto-mode candidate? Ordinary code pays for the page tests only; the
+/// exact address is compared on the few pages that have hooks (docs ch. 16.4, 17.6).
 #[inline(always)]
-fn is_hook_page(idle_pages: &[u32], pc: u32) -> bool {
+fn is_hook(ff: &FastForward, idle: &Idle, pc: u32) -> bool {
     let page = pc >> 12;
-    page == 0xFFF12 || page == 0xFFF16 || idle_pages.contains(&page)
+    if page == 0xFFF12 || page == 0xFFF16 {
+        return ff.is_hook(pc);
+    }
+    idle.hook_pages.contains(&page) && (idle.anchor == Some(pc) || idle.is_candidate(pc))
 }

@@ -87,3 +87,37 @@ fn rom_accelerators_are_exact() {
     assert!(fast.5 == slow.5, "same RAM contents");
     eprintln!("both reach the first key poll at {} cycles", fast.0);
 }
+
+/// The JIT (docs ch. 17) boots the ROM to the ROMMON prompt in exactly the
+/// same way as the interpreter: same instructions, same virtual time, same
+/// registers, console output and RAM after the same number of steps.
+#[test]
+fn jit_boots_rommon_exactly_like_the_interpreter() {
+    if !rom_available() {
+        return;
+    }
+    use c1700emu::machine::CpuEngine;
+    let cfg = BoardConfig { dram_banks: [16 << 20, 0, 0, 0], net: None, ..BoardConfig::default() };
+    let boot = |engine: CpuEngine, slices: Option<usize>| {
+        let mut m = new_machine(&cfg, 0x2100);
+        m.set_engine(engine, 2);
+        let mut out = Vec::new();
+        let mut n = 0;
+        while slices.map_or(!String::from_utf8_lossy(&out).contains("rommon 1 >"), |s| n < s) {
+            m.run(1_000_000, false);
+            out.extend(m.take_console_output());
+            n += 1;
+            assert!(n < 2000, "never reached the ROMMON prompt");
+        }
+        let report = m.jit.as_ref().map(|j| j.report()).unwrap_or_default();
+        (n, m.cpu.cycles, m.cpu.tb, m.cpu.gpr, m.cpu.cr, m.cpu.msr, String::from_utf8_lossy(&out).into_owned(), m.board.dram[0].clone(), report)
+    };
+    let interp = boot(CpuEngine::Interp, None);
+    let jit = boot(CpuEngine::Jit, Some(interp.0));
+    eprintln!("{}", jit.8);
+    assert_eq!(jit.1, interp.1, "virtual time");
+    assert_eq!((jit.2, jit.3, jit.4, jit.5), (interp.2, interp.3, interp.4, interp.5), "timebase and registers");
+    assert_eq!(jit.6, interp.6, "console output");
+    assert!(jit.7 == interp.7, "RAM contents");
+    assert!(jit.8.contains("blocks translated"));
+}

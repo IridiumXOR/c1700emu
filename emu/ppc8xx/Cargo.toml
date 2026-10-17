@@ -5,6 +5,11 @@ edition = "2024"
 description = "Interpreter for the PowerPC core of the Motorola MPC8xx (MPC860) family"
 
 [dependencies]
+cranelift-codegen = "=0.136.2"
+cranelift-frontend = "=0.136.2"
+cranelift-jit = "=0.136.2"
+cranelift-module = "=0.136.2"
+cranelift-native = "=0.136.2"
 log = "0.4"
 powerpc = "0.4"
 

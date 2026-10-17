@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use powerpc_asm::{Argument, Arguments, assemble};
+use ppc8xx::jit::CodeWatch;
 use ppc8xx::{BusError, Cpu, Platform, StepOutcome};
 
 /// Where test programs are loaded.
@@ -11,6 +12,9 @@ pub const CODE: u32 = 0x1000;
 pub const DATA: u32 = 0x8000;
 /// RAM covers 0..RAM_SIZE; anything above raises a bus error (machine check).
 pub const RAM_SIZE: u32 = 0x1_0000;
+/// A device register outside RAM: a 32-bit store sets the interrupt line
+/// to (value != 0). Reads return the line.
+pub const IRQ_PORT: u32 = 0x2_0000;
 
 /// Flat RAM at address 0 plus an external-interrupt line we can drive.
 pub struct TestBoard {
@@ -18,11 +22,13 @@ pub struct TestBoard {
     pub irq: bool,
     /// Count of accesses by width, to check that aligned accesses are not split.
     pub sized_accesses: [u32; 3],
+    /// Pages (4 KB) holding JIT-translated code.
+    pub code: CodeWatch,
 }
 
 impl TestBoard {
     pub fn new() -> Self {
-        TestBoard { ram: vec![0; RAM_SIZE as usize], irq: false, sized_accesses: [0; 3] }
+        TestBoard { ram: vec![0; RAM_SIZE as usize], irq: false, sized_accesses: [0; 3], code: CodeWatch::new() }
     }
     fn range(&self, addr: u32, len: u32) -> Result<std::ops::Range<usize>, BusError> {
         let end = addr.checked_add(len).ok_or(BusError)?;
@@ -54,24 +60,34 @@ impl Platform for TestBoard {
     }
     fn read32(&mut self, addr: u32) -> Result<u32, BusError> {
         self.sized_accesses[2] += 1;
+        if addr == IRQ_PORT {
+            return Ok(self.irq as u32);
+        }
         let r = self.range(addr, 4)?;
         Ok(u32::from_be_bytes(self.ram[r].try_into().unwrap()))
     }
     fn write8(&mut self, addr: u32, v: u8) -> Result<(), BusError> {
         self.sized_accesses[0] += 1;
         let r = self.range(addr, 1)?;
+        self.code.note_write(addr >> 12);
         self.ram[r.start] = v;
         Ok(())
     }
     fn write16(&mut self, addr: u32, v: u16) -> Result<(), BusError> {
         self.sized_accesses[1] += 1;
         let r = self.range(addr, 2)?;
+        self.code.note_write(addr >> 12);
         self.ram[r].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
     fn write32(&mut self, addr: u32, v: u32) -> Result<(), BusError> {
         self.sized_accesses[2] += 1;
+        if addr == IRQ_PORT {
+            self.irq = v != 0;
+            return Ok(());
+        }
         let r = self.range(addr, 4)?;
+        self.code.note_write(addr >> 12);
         self.ram[r].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
@@ -81,6 +97,26 @@ impl Platform for TestBoard {
     }
     fn external_interrupt(&self) -> bool {
         self.irq
+    }
+
+    fn host_page(&mut self, pa: u32, write: bool) -> Option<*mut u8> {
+        let page = pa & !0xFFF;
+        if page >= RAM_SIZE || (write && self.code.is_watched(pa >> 12)) {
+            return None;
+        }
+        Some(self.ram[page as usize..].as_mut_ptr())
+    }
+    fn watch_code_page(&mut self, pa: u32) -> Option<u32> {
+        (pa < RAM_SIZE).then(|| {
+            self.code.watch(pa >> 12);
+            pa >> 12
+        })
+    }
+    fn take_code_write(&mut self) -> Option<u32> {
+        self.code.take()
+    }
+    fn unwatch_code_pages(&mut self) {
+        self.code.clear();
     }
 }
 

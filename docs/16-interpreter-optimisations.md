@@ -107,6 +107,11 @@ flag). If not, an instruction only pays for one page comparison
 
 **Result:** 94.4 → 90.6 s (**+4%**).
 
+*Later refinement (chapter 17.9):* single-stepping whole pages also
+single-stepped the ordinary ROM code that shares those pages with a hook.
+Hooks are now exact addresses (the page test remains the cheap first
+check).
+
 ## 16.5 Decode cache indexed by address
 
 **Problem.** The hottest single spot of the interpreter was the decode
