@@ -530,19 +530,19 @@ impl Platform for LinuxUser {
     }
     fn write8(&mut self, a: u32, v: u8) -> Result<(), BusError> {
         let r = self.range(a, 1)?;
-        self.code.note_write(a >> 12);
+        self.code.note_write(a >> 12, a);
         self.mem[r.start] = v;
         Ok(())
     }
     fn write16(&mut self, a: u32, v: u16) -> Result<(), BusError> {
         let r = self.range(a, 2)?;
-        self.code.note_write(a >> 12);
+        self.code.note_write(a >> 12, a);
         self.mem[r].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
     fn write32(&mut self, a: u32, v: u32) -> Result<(), BusError> {
         let r = self.range(a, 4)?;
-        self.code.note_write(a >> 12);
+        self.code.note_write(a >> 12, a);
         self.mem[r].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
@@ -553,9 +553,9 @@ impl Platform for LinuxUser {
         }
         Some(self.mem[r].as_mut_ptr())
     }
-    fn watch_code_page(&mut self, pa: u32) -> Option<u32> {
+    fn watch_code(&mut self, pa: u32, len: u32) -> Option<u32> {
         self.range(pa & !0xFFF, 0x1000).ok()?;
-        self.code.watch(pa >> 12);
+        self.code.watch(pa >> 12, pa, len);
         Some(pa >> 12)
     }
     fn take_code_write(&mut self) -> Option<u32> {

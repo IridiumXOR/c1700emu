@@ -297,7 +297,7 @@ impl Board {
     /// if it holds translated code (one test when nothing is translated).
     #[inline]
     fn note_dram_write(&mut self, bank: u8, offset: u32) {
-        self.code.note_write(bank as u32 * DRAM_PAGES + (offset >> 12));
+        self.code.note_write(bank as u32 * DRAM_PAGES + (offset >> 12), offset);
     }
 
     pub fn peek8(&mut self, addr: u32) -> Option<u8> {
@@ -338,7 +338,7 @@ impl Board {
         for (bank, off, n) in chunks {
             let first = bank as u32 * DRAM_PAGES + (off >> 12) as u32;
             let last = bank as u32 * DRAM_PAGES + ((off + n - 1) >> 12) as u32;
-            self.code.note_range(first, last);
+            self.code.note_pages(first, last);
             self.dram[bank][off..off + n].fill(value);
         }
         true
@@ -353,7 +353,8 @@ impl Board {
             }
             // Let debuggers patch the ROM image in memory (handy for experiments).
             Region::Rom { base } => {
-                self.code.note_write(ROM_PAGES_BASE + ((base + (addr & PAGE_MASK)) >> 12));
+                let offset = base + (addr & PAGE_MASK);
+                self.code.note_write(ROM_PAGES_BASE + (offset >> 12), offset);
                 self.rom[(base + (addr & PAGE_MASK)) as usize] = value;
                 true
             }
@@ -657,13 +658,13 @@ impl Platform for Board {
         self.mpc.map_epoch
     }
 
-    fn watch_code_page(&mut self, pa: u32) -> Option<u32> {
+    fn watch_code(&mut self, pa: u32, len: u32) -> Option<u32> {
         let page = match self.region(pa) {
             Region::Dram { bank, base } => bank as u32 * DRAM_PAGES + ((base + (pa & PAGE_MASK)) >> 12),
             Region::Rom { base } => ROM_PAGES_BASE + ((base + (pa & PAGE_MASK)) >> 12),
             _ => return None,
         };
-        self.code.watch(page);
+        self.code.watch(page, pa & 0xFFF, len);
         Some(page)
     }
 

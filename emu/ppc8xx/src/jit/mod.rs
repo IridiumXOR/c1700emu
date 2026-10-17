@@ -15,20 +15,21 @@
 //!   can't fire inside it. A device access that raises an interrupt ends
 //!   the block after that instruction. Exceptions inside a block are precise
 //!   (see `codegen.rs`). Time advances by the block's length when it ends.
-//! * **Self-modifying code.** The platform watches the host pages that hold
-//!   translated code and reports writes to them ([`Platform::watch_code_page`]);
-//!   the blocks of a written page are dropped and retranslated when needed.
+//! * **Self-modifying code.** The platform watches the instruction words
+//!   that were translated and reports writes to them
+//!   ([`Platform::watch_code`]); the translations covering a written word
+//!   are dropped and retranslated when needed.
 
 mod codegen;
 mod runtime;
 mod scan;
 mod watch;
 
-pub use watch::CodeWatch;
+pub use watch::{CodeWatch, WORDS_PER_PAGE, word_id};
 
 use crate::mmu::{Access, Fault};
 use crate::{BatchEnd, Cpu, Exception, Platform, StepOutcome, msr};
-use codegen::{BlockFn, Compiler, RAISED};
+use codegen::{BlockFn, Compiler, EARLY, RAISED, STEPS};
 use powerpc::{Extensions, Ins};
 use runtime::{Helpers, JitCtx, mode_index};
 use std::collections::HashMap;
@@ -43,6 +44,14 @@ pub const DEFAULT_THRESHOLD: u32 = 50;
 
 /// Generated code is thrown away (and regenerated when needed) beyond this.
 const CODE_LIMIT: usize = 64 << 20;
+
+/// The JIT indexes its translations by 32-byte lines of the platform's
+/// pages: a written word drops the translations registered on its line.
+const INDEX_LINE: u32 = 32;
+
+fn index_line(page: u32, offset_in_page: u32) -> u32 {
+    word_id(page, offset_in_page) / (INDEX_LINE / 4)
+}
 
 /// MSR bits a translation depends on: they are part of the block's key.
 const MODE_BITS: u32 = msr::IR | msr::DR | msr::PR;
@@ -64,9 +73,12 @@ fn jump_slot(pc: u32) -> usize {
     (pc >> 2) as usize % JUMP_ENTRIES
 }
 
+/// A ready entry point: block number `entry` of a translated region.
 #[derive(Clone, Copy)]
 struct Translated {
     func: BlockFn,
+    entry: u32,
+    /// Length of that block: it must fit before the region is entered.
     len: u32,
 }
 
@@ -110,7 +122,9 @@ enum Interpreted {
 
 #[derive(Clone, Default, Debug)]
 pub struct JitStats {
+    /// Regions translated, and entry points (blocks) in them.
     pub blocks_translated: u64,
+    pub entries_translated: u64,
     pub translate_time: Duration,
     /// Guest instructions in all translated blocks (for the average size).
     pub translated_instructions: u64,
@@ -160,8 +174,11 @@ pub struct Jit {
     compiler: Compiler,
     blocks: BlockMap,
     jump: Box<[JumpEntry]>,
-    /// Host page (platform's number) → keys of the blocks translated from it.
-    pages: HashMap<u32, Vec<u64>>,
+    /// 32-byte line (`index_line`) → regions with code on it.
+    lines: HashMap<u32, Vec<usize>>,
+    /// Translated regions: the keys of their entry points (`None` once
+    /// dropped). A region is one function, so it is dropped as a whole.
+    regions: Vec<Option<Vec<u64>>>,
     threshold: u32,
     pub stats: JitStats,
 }
@@ -184,7 +201,8 @@ impl Jit {
             compiler: Compiler::new(),
             blocks: BlockMap::default(),
             jump: vec![NO_JUMP; JUMP_ENTRIES].into_boxed_slice(),
-            pages: HashMap::new(),
+            lines: HashMap::new(),
+            regions: Vec::new(),
             threshold: threshold.max(1),
             stats: JitStats::default(),
         }
@@ -270,7 +288,7 @@ impl Jit {
 
             let (k, end) = match action {
                 Action::Run(t) => {
-                    let (k, end) = self.run_translated(cpu, sys, t, pc);
+                    let (k, end) = self.run_translated(cpu, sys, t, room);
                     n += k;
                     if end == BatchEnd::Checkstop {
                         return (n, end);
@@ -281,8 +299,9 @@ impl Jit {
                     continue;
                 }
                 Action::Translate => {
-                    let state = self.translate(cpu, sys, pc, pa, key, &mut stop_before);
-                    self.blocks.insert(key, Entry { pa, state });
+                    if let Some(state) = self.translate(cpu, sys, pc, pa, key, &mut stop_before) {
+                        self.blocks.insert(key, Entry { pa, state });
+                    }
                     continue; // dispatch again: now it runs (or is interpreted)
                 }
                 Action::Stretch(why) => self.interpret(cpu, sys, room, false, why, &mut stop_before),
@@ -306,7 +325,8 @@ impl Jit {
     pub fn flush<P: Platform>(&mut self, sys: &mut P) {
         self.blocks.clear();
         self.jump.fill(NO_JUMP);
-        self.pages.clear();
+        self.lines.clear();
+        self.regions.clear();
         sys.unwatch_code_pages();
         self.ctx.code_writes.clear();
         self.ctx.tables.flush_all();
@@ -316,7 +336,14 @@ impl Jit {
         self.stats.flushes += 1;
     }
 
-    fn run_translated<P: Platform>(&mut self, cpu: &mut Cpu, sys: &mut P, t: Translated, pc: u32) -> (u64, BatchEnd) {
+    /// Run a translated region with at most `room` instructions (fewer if
+    /// the decrementer would fire sooner).
+    fn run_translated<P: Platform>(&mut self, cpu: &mut Cpu, sys: &mut P, t: Translated, room: u64) -> (u64, BatchEnd) {
+        let mut budget = room;
+        if cpu.msr & msr::EE != 0 {
+            budget = budget.min(cpu.instructions_until_decrementer_request());
+        }
+        let budget = budget.min(STEPS as u64) as u32;
         let mode = mode_index(cpu.msr);
         let ctx = &mut *self.ctx;
         ctx.read_table = ctx.tables.read[mode].as_mut_ptr();
@@ -329,23 +356,23 @@ impl Jit {
         let ctx_ptr: *mut JitCtx = ctx;
         // SAFETY: the block was generated for this JitCtx/Cpu layout; the
         // pointers are live and exclusively used by the block for the call.
-        let r = unsafe { (t.func)(ctx_ptr, cpu_ptr) };
+        let r = unsafe { (t.func)(ctx_ptr, cpu_ptr, budget, t.entry) };
 
-        let steps = (r & 0xFFFF) as u64;
+        let steps = (r & STEPS) as u64;
         cpu.advance_clock(steps);
         self.stats.block_runs += 1;
         self.stats.jit_instructions += steps;
         if r & RAISED != 0 {
-            // Precise exception at the block's `steps`-th instruction; like
+            // Precise exception at the region's `steps`-th instruction; like
             // the interpreter, that instruction's clock tick counts.
-            let fault_pc = pc.wrapping_add(4 * (steps as u32 - 1));
+            let fault_pc = self.ctx.fault_pc;
             cpu.pc = fault_pc;
             let exc = self.ctx.exception.take().expect("a block reported an exception without one");
             self.stats.exceptions += 1;
             if cpu.enter_exception(exc, fault_pc) == StepOutcome::Checkstop {
                 return (steps, BatchEnd::Checkstop);
             }
-        } else if steps < t.len as u64 {
+        } else if r & EARLY != 0 {
             self.stats.early_exits += 1;
         }
         (steps, BatchEnd::Budget)
@@ -385,7 +412,9 @@ impl Jit {
         (k, end)
     }
 
-    /// Translate the block at `pc` (physical `pa`) and return its new state.
+    /// Translate the region starting at `pc` (physical `pa`). All its block
+    /// starts become ready entries in the block table. Returns the state to
+    /// record for `pc` if it couldn't be translated.
     fn translate<P: Platform>(
         &mut self,
         cpu: &Cpu,
@@ -394,48 +423,81 @@ impl Jit {
         pa: u32,
         key: u64,
         stop_before: &mut impl FnMut(u32) -> bool,
-    ) -> State {
+    ) -> Option<State> {
         if self.compiler.code_bytes > CODE_LIMIT {
             self.flush(sys);
         }
-        // Watch first, then read the code: no write can slip in between.
-        let Some(page) = sys.watch_code_page(pa) else { return State::Unwatched };
-        if !self.pages.contains_key(&page) {
-            // New code page: store entries for it must go (stores to code
-            // must reach the platform, which reports them).
-            self.ctx.tables.flush_writes();
-        }
+        let mode = key & !0xFFFF_FFFF;
         // With translation on, 1 KB sub-pages can have different
         // permissions: a block never crosses one. Real mode: the 4 KB page.
         let boundary = if cpu.msr & msr::IR != 0 { 1024 } else { 4096 };
-        let block = scan::scan(sys, pc, pa, boundary, stop_before);
-        if block.is_empty() {
-            return State::FirstIsStop(sys.fetch(pa).unwrap_or(0));
+        // A region also stops where another one already has an entry: each
+        // piece of code is translated once, and execution passes between
+        // regions through the dispatcher.
+        let blocks = &self.blocks;
+        let translated = |a: u32| matches!(blocks.get(&(a as u64 | mode)), Some(Entry { state: State::Translated(_), .. }));
+        let mut stop = |a: u32| stop_before(a) || (a != pc && translated(a));
+        let region = scan::scan_region(sys, pc, pa, boundary, cpu.msr & msr::PR != 0, &mut stop);
+        if region.is_empty() {
+            return Some(State::FirstIsStop(sys.fetch(pa).unwrap_or(0)));
         }
+        // Watch the code (nothing runs between reading and watching it).
+        // The region is inside one page, so all its blocks have one page id.
+        let mut watched = Vec::new();
+        for block in &region {
+            let block_pa = pa.wrapping_add(block.start.wrapping_sub(pc));
+            let bytes = 4 * block.insns.len() as u32;
+            let Some(page) = sys.watch_code(block_pa, bytes) else { return Some(State::Unwatched) };
+            let offset = block_pa & 0xFFF;
+            for o in (offset & !(INDEX_LINE - 1)..offset + bytes).step_by(INDEX_LINE as usize) {
+                watched.push(index_line(page, o));
+            }
+        }
+        // Store entries for watched pages must go: stores to code have to
+        // reach the platform, which checks them.
+        self.ctx.tables.flush_writes();
         let start = Instant::now();
-        match self.compiler.compile(&block, pc) {
+        match self.compiler.compile(&region) {
             Ok(func) => {
                 self.stats.blocks_translated += 1;
-                self.stats.translated_instructions += block.len() as u64;
+                self.stats.entries_translated += region.len() as u64;
+                self.stats.translated_instructions += region.iter().map(|b| b.insns.len() as u64).sum::<u64>();
                 self.stats.translate_time += start.elapsed();
-                self.pages.entry(page).or_default().push(key);
-                State::Translated(Translated { func, len: block.len() as u32 })
+                let id = self.regions.len();
+                let mut keys = Vec::new();
+                for (i, block) in region.iter().enumerate() {
+                    let k = block.start as u64 | mode;
+                    let t = Translated { func, entry: i as u32, len: block.insns.len() as u32 };
+                    self.blocks.insert(k, Entry { pa: pa.wrapping_add(block.start.wrapping_sub(pc)), state: State::Translated(t) });
+                    keys.push(k);
+                }
+                self.regions.push(Some(keys));
+                watched.sort_unstable();
+                watched.dedup();
+                for line in watched {
+                    self.lines.entry(line).or_default().push(id);
+                }
+                None
             }
             Err(e) => {
-                log::error!(target: "jit", "cannot translate the block at {pc:#010x}: {e}");
-                State::Unwatched
+                log::error!(target: "jit", "cannot translate the region at {pc:#010x}: {e}");
+                Some(State::Unwatched)
             }
         }
     }
 
     /// Bring the JIT's caches in line with the platform and the MMU.
     fn sync<P: Platform>(&mut self, cpu: &Cpu, sys: &mut P) {
-        while let Some(page) = sys.take_code_write() {
-            self.ctx.code_writes.push(page);
+        while let Some(line) = sys.take_code_write() {
+            self.ctx.code_writes.push(line);
         }
-        while let Some(page) = self.ctx.code_writes.pop() {
-            if let Some(keys) = self.pages.remove(&page) {
-                self.stats.invalidated_blocks += keys.len() as u64;
+        while let Some(word) = self.ctx.code_writes.pop() {
+            let line = word / (INDEX_LINE / 4);
+            for id in self.lines.remove(&line).unwrap_or_default() {
+                // (A region is listed under each of its lines: maybe gone already.)
+                let Some(keys) = self.regions[id].take() else { continue };
+                log::debug!(target: "jit", "code word {word:#x} written: region at {:#010x} dropped", keys[0] as u32);
+                self.stats.invalidated_blocks += 1;
                 for k in keys {
                     self.blocks.remove(&k);
                     let slot = jump_slot(k as u32);
@@ -466,8 +528,9 @@ impl Jit {
         let total = (s.jit_instructions + interpreted).max(1);
         let pct = |n: u64| n as f64 * 100.0 / total as f64;
         let mut out = format!(
-            "JIT: {} blocks translated (avg {:.1} instructions, {:.2} s, {} KB of code), {} flushes, {} blocks invalidated\r\n",
+            "JIT: {} regions translated ({} blocks, avg {:.1} instructions per region, {:.2} s, {} KB of code), {} flushes, {} regions invalidated\r\n",
             s.blocks_translated,
+            s.entries_translated,
             s.translated_instructions as f64 / s.blocks_translated.max(1) as f64,
             s.translate_time.as_secs_f64(),
             self.compiler.code_bytes / 1024,
@@ -475,7 +538,7 @@ impl Jit {
             s.invalidated_blocks,
         );
         out += &format!(
-            "  instructions: {:.1}% translated code ({} block runs, avg {:.1}), interpreted: {:.1}% cold, {:.1}% untranslatable, {:.1}% tails, {:.1}% unwatched memory\r\n",
+            "  instructions: {:.1}% translated code ({} region runs, avg {:.1}), interpreted: {:.1}% cold, {:.1}% untranslatable, {:.1}% tails, {:.1}% unwatched memory\r\n",
             pct(s.jit_instructions),
             s.block_runs,
             s.jit_instructions as f64 / s.block_runs.max(1) as f64,

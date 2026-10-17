@@ -155,9 +155,10 @@ The bigger wins for the *experience* of using the emulator aren't the JIT:
    discovery, invalidation and exit machinery they need is the same as
    for a JIT, so I went straight to:
 5. **A Cranelift JIT for hot blocks**, verified against the interpreter.
-   **Done** (chapter 17): `--cpu jit`, 4.3× the interpreter on the
-   benchmark, checked by JIT-vs-interpreter tests, the random differential
-   tests and an exact ROMMON boot comparison.
+   **Done** (chapter 17): `--cpu jit`, ~9.8× the interpreter on the
+   benchmark (312.6 vs 32.0 MIPS), CPU-bound IOS boot 217.8 → 38.4 s,
+   checked by JIT-vs-interpreter tests, the random differential tests and
+   an exact ROMMON boot comparison.
 
 Honest expectations: the self-decompressor (tight loops) would gain the
 most, maybe 10×; IOS as a whole less, because device accesses, MMIO and

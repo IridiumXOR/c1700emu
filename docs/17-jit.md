@@ -21,11 +21,11 @@ The code is in `emu/ppc8xx/src/jit/`:
 
 | file | what |
 |---|---|
-| `mod.rs` | the dispatcher: block table, when to translate, running blocks, exactness rules |
-| `scan.rs` | finding a block and classifying its instructions |
+| `mod.rs` | the dispatcher: entry table, when to translate, running regions, exactness rules |
+| `scan.rs` | finding blocks and regions, classifying instructions |
 | `codegen.rs` | guest instructions → Cranelift IR → x86-64 (or AArch64) |
 | `runtime.rs` | what translated code runs against: context, fast memory tables, helpers |
-| `watch.rs` | `CodeWatch`, for platforms: which pages hold translated code, which were written |
+| `watch.rs` | `CodeWatch`, for platforms: which instruction words hold translated code, which were written |
 
 ## 17.1 The idea in one picture
 
@@ -33,20 +33,24 @@ The code is in `emu/ppc8xx/src/jit/`:
             ┌──────────────── dispatcher (Jit::run_batch) ───────────────┐
  cpu.pc ──▶ │ interrupt pending? ──yes──▶ interpreter takes it (1 step)  │
             │ ITLB translate pc  ──fault─▶ exception entry               │
-            │ look up block (pc, MSR mode)                               │
+            │ look up entry (pc, MSR mode)                               │
             │   cold   → count; interpret up to the next branch          │
-            │   hot    → translate with Cranelift (once)                 │
-            │   ready  → call the host code; advance the clock by its    │
-            │            length; handle a precise exception if raised    │
+            │   hot    → translate its region with Cranelift (once)      │
+            │   ready  → call the host code with a budget; advance the   │
+            │            clock by what it ran; precise exception if any  │
             └────────────────────────────────────────────────────────────┘
 ```
 
 A **block** is straight-line guest code starting at one address. It ends
 with a branch, before an instruction the translator leaves to the
 interpreter, at the end of the page (1 KB with translation on, see 17.5) or
-after 64 instructions. A block is translated once its start has been
-reached 50 times (`--jit-threshold`); code that runs fewer times is cheaper
-to interpret than to compile.
+after 64 instructions. A **region** is a block plus the blocks reachable
+from it by direct branches in the same page, translated as one function
+in which loops run without returning to the dispatcher (17.10). A region
+is translated once its first block has been reached 50 times
+(`--jit-threshold`); code that runs fewer times is cheaper to interpret
+than to compile. The first sections describe the JIT with one block per
+function, as it was first built; 17.10 is the step to regions.
 
 ## 17.2 Step 1: what the core had to offer
 
@@ -69,7 +73,7 @@ own functions. A few additions were needed:
   case the JIT simply interprets everything):
   `host_page` (a host pointer to a page of plain memory),
   `memory_map_epoch` (changes when those pointers may be wrong),
-  `watch_code_page` / `take_code_write` / `unwatch_code_pages` (17.6).
+  `watch_code` / `take_code_write` / `unwatch_code_pages` (17.7).
 
 ## 17.3 Step 2: what gets translated
 
@@ -77,10 +81,10 @@ own functions. A few additions were needed:
 
 | kind | instructions | how |
 |---|---|---|
-| **Native** | integer arithmetic (OE=0), compares, logical, rotates and shifts, CR operations, all byte/half/word loads and stores (update, indexed, byte-reversed), `mfspr`/`mtspr` of LR, CTR, XER, `sync`/`isync`/`eieio`/`dcbt` | translated to host instructions |
+| **Native** | integer arithmetic (OE=0), compares, logical, rotates and shifts, CR operations, all byte/half/word loads and stores (update, indexed, byte-reversed), `mfspr`/`mtspr` of LR, CTR, XER, `mftb` and `mfspr` of TBL/TBU/DEC (17.10), `sync`/`isync`/`eieio`/`dcbt` | translated to host instructions |
 | **Helper** | `lmw`/`stmw`, string instructions, `lwarx`/`stwcx.`, `dcbz`, cache-line operations, traps, `mfmsr`, XO forms with OE=1, other `mfspr`, `mtspr` of SPRG/SRR/DAR/DSISR | a call to the interpreter's own code for that one instruction |
 | **Branch** | `b`, `bc`, `bclr`, `bcctr` (with or without LK, with CTR decrement) | translated; ends the block |
-| **Stop** | `sc`, `rfi`, `mtmsr`, `mftb`, `mfspr`/`mtspr` of DEC and TB, `mtspr` of EIE/EID/NRI, MMU registers and IMMR, `tlbie`, `tlbia`, floating point, illegal words | not translated: the block ends *before* it and the interpreter runs it |
+| **Stop** | `sc`, `rfi`, `mtmsr`, `mtspr` of DEC and TB, of EIE/EID/NRI, of the MMU registers and IMMR, `mfspr` of DEC in user mode, `tlbie`, `tlbia`, floating point, illegal words | not translated: the block ends *before* it and the interpreter runs it |
 
 The rule behind the last row: a block assumes that nothing changes the MSR
 (privilege, translation, interrupt enable), the virtual time, the TLBs or
@@ -161,7 +165,7 @@ About 40 host instructions for 4 guest instructions, against roughly
 150 host cycles *per guest instruction* in the interpreter. It also shows
 what is still wasteful: three compares to build one CR field, the branch
 re-reading a CR bit it just computed, and a return to the dispatcher every
-iteration (17.11).
+iteration (solved by regions, 17.10).
 
 ## 17.5 Step 4: memory accesses and precise exceptions
 
@@ -201,13 +205,15 @@ The dispatcher reproduces `Cpu::step` at block granularity:
 * **The decrementer**: with `MSR[EE]=1`, a block runs only if
   `instructions_until_decrementer_request() >= len`. Otherwise the
   interpreter runs the code, so the interrupt lands on the same
-  instruction.
+  instruction. (With regions this limit is part of the *budget* the
+  region receives, 17.10.)
 * **Device interrupts**: the only way the external interrupt line can
   change inside a batch is a device access, which goes through a helper.
   If it raised the line (with `EE=1`), the helper tells the block to stop
   right after that instruction.
 * **Batch budget**: the machine syncs devices every 256 instructions; a
-  block that doesn't fit before that point is interpreted instead.
+  block that doesn't fit before that point is interpreted instead (with
+  regions: also part of the budget).
 * **Hooks**: the machine has per-address hooks (ROM delay loops and
   memory clear, the idle anchor). The dispatcher stops before a hook
   address at a block start, and a translated block always ends before one,
@@ -218,18 +224,20 @@ The dispatcher reproduces `Cpu::step` at block granularity:
 IOS decompresses itself (55 MB written, then executed), and ROMMON copies
 code too. A translation is only valid while its guest code is unchanged.
 
-The platform **watches** each host page that holds translated code
-(`CodeWatch`, a bitmap) and reports any write to it: CPU stores, DMA (FEC,
-IDMA, SPI), the ROM memory-clear accelerator and debugger writes all go
-through the board, which checks the bitmap (one test while nothing is
-watched). The JIT then drops the page's blocks; they are retranslated when
-they run again.
+The platform **watches** the instruction words that were translated
+(`CodeWatch`: a bit per page as a quick first test, then a bit per word)
+and reports any write to them: CPU stores, DMA (FEC, IDMA, SPI), the ROM
+memory-clear accelerator and debugger writes all go through the board,
+which checks it (one test while nothing is watched). The JIT then drops
+the translations that contain the word; they are retranslated when they
+run again. (Watching started with whole pages; why it became words is in
+17.10.)
 
 Three details make this airtight:
 
-* the **fast tables never hold a store entry for a watched page**, so the
-  JIT's own stores to code always take the helper path and get reported;
-  watching a new page flushes the store tables;
+* the **fast tables never hold a store entry for a page with watched
+  code**, so the JIT's own stores to code always take the helper path and
+  get checked; every translation flushes the store tables;
 * if a block writes its own page, the helper stops it after that store,
   so the next instruction is fetched fresh, as in the interpreter;
 * pages are identified by **host memory**, not physical address: the
@@ -243,13 +251,14 @@ behind an address may have changed.
 
 The tests are all "JIT versus interpreter: same final state".
 
-* `ppc8xx/tests/jit.rs` (10 tests): loops of arithmetic, memory and
+* `ppc8xx/tests/jit.rs` (11 tests): loops of arithmetic, memory and
   branches; a machine check in the middle of a block; helper instructions
   and an alignment exception; a loop that rewrites its own first
-  instruction (1004 invalidations); decrementer interrupts falling into
-  blocks; an interrupt raised by a store; indirect branches with link;
-  translation on, with TLB misses refilled by the manual's reload handlers,
-  `tlbie` every pass and a protection fault inside a block. Each runs with
+  instruction; decrementer interrupts falling into blocks; an interrupt
+  raised by a store; indirect branches with link; translation on, with TLB
+  misses refilled by the manual's reload handlers, `tlbie` every pass and a
+  protection fault inside a block; timebase and decrementer reads inside
+  blocks, in supervisor and user mode. Each runs with
   translation thresholds 1 and 3 and compares registers, clock, timebase,
   decrementer, exception counts and all of RAM.
 * `ppc8xx/tests/qemu_diff.rs`: the random instruction sequences of
@@ -272,7 +281,10 @@ code generator on purpose, one at a time:
 
 The hand-written tests check the machinery (exits, faults, interrupts,
 invalidation); the random ones check semantics. The last row led to the
-`indirect_branches_with_link` test, which catches it.
+`indirect_branches_with_link` test, which catches it. The same was done
+for the region code of 17.10: a wrong instruction count on an internal
+jump, a budget check against the count before the next block instead of
+after it, and a timebase read one tick late were all caught.
 
 ## 17.9 Step 8: first measurement, and a surprise
 
@@ -324,7 +336,71 @@ shrank the gap to 2% (31.7 vs 31.0). So it is mostly where the hot loops
 land in the binary, not work the interpreter does; the remaining 2% is not
 explained yet.
 
-## 17.10 Results
+## 17.10 Step 9: regions, and what compiling really costs
+
+At 137 MIPS a profile showed the dispatcher as a big share again: blocks
+average five instructions, and every block returned to it. This step
+went in four moves, each measured on the benchmark.
+
+**`mftb`/`mfdec` translated.** The time at the *i*-th instruction of a
+region is the time at its entry plus *i* ticks (the clock advances once
+per instruction, see `Cpu::tick`), so the generated code computes
+`tb + (prescaler + i) / divider` from the `Cpu` struct. `mfdec` is
+supervisor-only; in user mode it stays with the interpreter, which raises
+the Program exception. The ROM's delay loops and IOS's timer reads no
+longer cut loops in two.
+
+**Regions.** A region is the block at the hot address plus every block
+reachable from it by direct branches (taken and fall-through) inside the
+same page (1 KB with translation on), at most 256 instructions, never
+through a hook address. It becomes one function `fn(ctx, cpu, budget,
+entry)`:
+
+* `budget` = `min(steps left in the batch, instructions until the
+  decrementer request)`; before every jump to another block of the region
+  the code checks that the next block still fits, otherwise it returns
+  with the exact PC and count, and the dispatcher continues;
+* the count of instructions executed so far is a Cranelift variable, so a
+  fault or helper exit anywhere returns the exact total (the faulting PC
+  goes to `JitCtx::fault_pc`);
+* each guest block re-reads the registers it uses from the `Cpu` struct
+  (it can be entered from several places; write-through keeps the struct
+  current).
+
+Region runs went from 5 to ~120 instructions per dispatcher call. But the
+benchmark barely moved: **compiling** now took 12 of 21 seconds.
+
+**What compiling costs.** Three findings, in order:
+
+1. Cranelift's IR verifier runs on every function by default
+   (`enable_verifier`): off, 12 → 7.7 s.
+2. 70% of the translations were thrown away by code writes, all on one
+   physical page, 0x4000. With the `--watch` tool and a backtrace on the
+   first hits: a halfword variable at 0x43a4 is written over and over
+   during IOS's boot, and translated code starts at 0x43a8, **four bytes
+   later**. Watching whole pages, then 32-byte lines, kept throwing that
+   code away. Now the platform watches exactly the translated instruction
+   words; the JIT indexes its regions by 32-byte lines. Invalidations:
+   2476 → 10.
+3. Only **4 062 distinct instructions** had been compiled **141 734
+   times**: every hot address got its own region with everything
+   reachable from it, so each loop body was compiled once per entry into
+   it. Now a region is a **multi-entry** function: a jump table on the
+   `entry` parameter, every block start of a region becomes a ready entry
+   in the dispatcher's table, and a new region stops where an existing
+   one already has an entry. Each piece of code is compiled once;
+   execution passes between regions through the dispatcher. Compiling:
+   4.35 → 0.3 s.
+
+(A bug on the way: Cranelift panicked in `remove_constant_phis`. The jump
+table used the same `BlockCall` as its default and as entry 0; the SSA
+builder appends the variables' arguments to each edge's argument list, so
+the shared list got them twice. Each edge needs its own `BlockCall`.)
+
+With compiling cheap, Cranelift's `opt_level` hardly matters any more
+(`none` 305, `speed` 306 MIPS); it stays at `speed`.
+
+## 17.11 Results
 
 `tools/bench.sh` (3 billion executed instructions: ROMMON, then IOS's
 self-decompression; accelerators and idle detection off):
@@ -334,30 +410,54 @@ self-decompression; accelerators and idle detection off):
 | first working version | 32.5 MIPS | 27.7 MIPS (slower!) |
 | IMMR rewrites no longer flush everything (17.9) | 31.0 | 59.6 |
 | jump cache, sync only after helpers | 31.0 | 62.5 |
-| exact hook addresses (17.9) | **32.0** | **136.9** (93.8 s vs **21.9 s**) |
+| exact hook addresses (17.9) | 32.0 | 136.9 |
+| `mftb` native, regions | | 142.2 (compiling: 12 s) |
+| Cranelift verifier off | | 176.6 |
+| code watched per word | | 197.9 |
+| multi-entry regions (no duplicate compiling) | | 302.2 (compiling: 0.3 s) |
+| clock helpers inlined | **32.0** | **312.6** (93.8 s vs **9.6 s**) |
 
-The JIT is **4.3×** the interpreter on this benchmark. 97.6% of the
-instructions run as translated code; 3566 blocks were translated in
-0.95 s (619 KB of host code). The biggest single gain didn't come from the
-JIT at all but from the machine around it: code that was never given to
-either engine's fast path.
+The JIT is **~9.8×** the interpreter on this benchmark. 98.9% of the
+instructions run as translated code, a region run averages ~49
+instructions, and 788 regions (1572 entry points, 357 KB of host code)
+were compiled in 0.4 s.
 
-## 17.11 What limits it, and next steps
+**IOS**, boot to `Router>` with `--idle off` (everything CPU-bound, the
+idle loop included):
 
-* **`mftb` and `mfdec`** are left to the interpreter (the block's clock
-  only advances at its end). They are frequent: the ROM's delay loops and
-  IOS's timers (38.7 million `mftb` in the IOS session), and each one
-  splits a loop into two dispatches. The time at instruction *i* of a block
-  is known (entry time + *i* ticks), so they can be translated.
-* **Dispatch cost.** Blocks are short (~5 instructions per run), and every
-  block returns to the dispatcher: interrupt check, jump cache lookup,
-  clock update. **Block chaining** (a block jumping straight to the next
-  one when it is safe) removes most of that.
+| engine | `Router>` after |
+|---|---|
+| interpreter | 217.8 s |
+| JIT, first version (block per function) | 66.2 s |
+| JIT, regions | **38.4 s** (5.7×) |
+
+In the same session, configuring the interface and pinging the virtual
+host work (4/5, 1 ms), and `show clock` advanced 96 s during a 30 s wait:
+with nothing holding it back, the emulated router runs about 3× faster
+than the real one. With idle detection on (the default), both engines
+reach `Router>` at about the same time: virtual time may not run ahead of
+the wall clock, and IOS's boot waits on its own timers (17.9).
+
+Where the time goes now (`perf`, benchmark): translated code 43%, the
+dispatcher ~14%, reading the IOS image out of flash through the device
+path ~10%, the interpreter for the rest (tails, cold code, untranslatable
+instructions).
+
+## 17.12 What limits it, and next steps
+
+* **Flash reads.** ROMMON copies the 21 MB image out of flash through the
+  flash device model. Reading flash directly while it is in read-array
+  mode needs a cheap way to invalidate just those fast-table entries when
+  a command changes the mode (it happens for every word while
+  programming).
 * **CR handling**: a compare builds all four bits of a CR field and a
   following branch reads one of them back; keeping the comparison result
-  for the branch would save most of that code.
+  for the branch would save code in every loop.
 * **Write-through registers**: one store per register write; keeping
   registers in host registers until an exit would save more.
-* A **lockstep checking mode** (`--cpu jit-check`: every block run by both
+* **Region boundaries**: execution passes between regions through the
+  dispatcher; jumping straight from one region into another (chaining)
+  would remove that cost.
+* A **lockstep checking mode** (`--cpu jit-check`: every region run by both
   engines, compared) would let the full IOS boot verify the JIT, not only
   the tests.

@@ -1,10 +1,15 @@
-//! Translating a block: guest instructions → Cranelift IR → host code.
+//! Translating a region: guest instructions → Cranelift IR → host code.
 //!
-//! A translated block is a function `fn(ctx, cpu) -> u32` that runs the
-//! block's instructions on the guest state in the [`Cpu`] struct and
-//! returns how many it executed, with [`RAISED`] set if the last one raised
-//! an exception. (`cpu.pc` is left untouched then; the dispatcher knows
-//! which instruction it was.)
+//! A region (see `scan::scan_region`) is translated to one function
+//! `fn(ctx, cpu, budget, entry) -> u32`. It starts at guest block number
+//! `entry` (every block of the region is an entry point), runs guest blocks
+//! on the state in the [`Cpu`] struct, jumping from block to block inside
+//! the host code while the next block fits in `budget` instructions, and
+//! returns how many
+//! instructions it executed: with [`RAISED`] set if the last one raised an
+//! exception (its address is left in `JitCtx::fault_pc`), [`EARLY`] if a
+//! helper asked to stop. The count so far lives in a variable, so every
+//! exit reports it exactly.
 //!
 //! **Guest registers** are Cranelift variables: loaded from the `Cpu` struct
 //! the first time the block reads them, then kept in host registers, and
@@ -18,25 +23,30 @@
 //! misaligned accesses and faults exactly like the interpreter.
 
 use super::runtime::{EXCEPTION, EXIT, FastEntry, Helpers, JitCtx, TABLE_ENTRIES};
-use super::scan::{Insn, Kind};
+use super::scan::{Block as GuestBlock, Kind};
 use crate::Cpu;
 use crate::execute::mask;
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I16, I32, I64};
-use cranelift_codegen::ir::{AbiParam, Block, Function, InstBuilder, MemFlagsData, SigRef, Signature, Type, UserFuncName, Value};
+use cranelift_codegen::ir::{AbiParam, Block, Function, InstBuilder, JumpTableData, MemFlagsData, SigRef, Signature, Type, UserFuncName, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
 use powerpc::{Ins, Opcode};
 use std::mem::offset_of;
 
-/// A translated block.
-pub(super) type BlockFn = unsafe extern "C" fn(*mut JitCtx, *mut Cpu) -> u32;
+/// A translated region: `(ctx, cpu, budget, entry block) -> steps | flags`.
+pub(super) type BlockFn = unsafe extern "C" fn(*mut JitCtx, *mut Cpu, u32, u32) -> u32;
 
-/// Set in a block's result when its last executed instruction raised an
-/// exception (stored in `JitCtx::exception`).
+/// Set in a region's result when its last executed instruction raised an
+/// exception (stored in `JitCtx::exception`, its address in `fault_pc`).
 pub(super) const RAISED: u32 = 1 << 16;
+/// Set when a helper made the region stop early (interrupt raised, code
+/// written...). Statistics only.
+pub(super) const EARLY: u32 = 1 << 17;
+/// Mask of the instruction count in a region's result.
+pub(super) const STEPS: u32 = 0xFFFF;
 
 /// Guest state slots the translator keeps in variables: r0-r31, then:
 const CR: usize = 32;
@@ -75,7 +85,7 @@ pub(super) struct Compiler {
 }
 
 fn new_module() -> JITModule {
-    let builder = JITBuilder::with_flags(&[("opt_level", "speed")], default_libcall_names())
+    let builder = JITBuilder::with_flags(&[("opt_level", "speed"), ("enable_verifier", "false")], default_libcall_names())
         .expect("Cranelift cannot generate code for this host");
     JITModule::new(builder)
 }
@@ -91,7 +101,7 @@ impl Compiler {
             s
         };
         Compiler {
-            block_sig: sig(&[I64, I64], I32),
+            block_sig: sig(&[I64, I64, I32, I32], I32),
             load_sig: sig(&[I64, I32], I64),
             store_sig: sig(&[I64, I32, I32], I32),
             exec_sig: sig(&[I64, I32, I32], I32),
@@ -110,12 +120,12 @@ impl Compiler {
         self.code_bytes = 0;
     }
 
-    /// Translate `block` (starting at guest address `pc`) to host code.
+    /// Translate a region (`region[0]` is where it is entered) to host code.
     ///
     /// With the log target `jit_ir` at trace level (`--log-level
-    /// warn,jit_ir=trace`) every block is logged three times: guest code,
+    /// warn,jit_ir=trace`) every region is logged three times: guest code,
     /// Cranelift IR, and the host code Cranelift generated.
-    pub fn compile(&mut self, block: &[Insn], pc: u32) -> Result<BlockFn, String> {
+    pub fn compile(&mut self, region: &[GuestBlock]) -> Result<BlockFn, String> {
         let dump = log::log_enabled!(target: "jit_ir", log::Level::Trace);
         self.ctx.set_disasm(dump);
         self.ctx.func = Function::with_name_signature(UserFuncName::default(), self.block_sig.clone());
@@ -124,26 +134,31 @@ impl Compiler {
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
-            let (ctx, cpu) = (b.block_params(entry)[0], b.block_params(entry)[1]);
+            let params = b.block_params(entry).to_vec();
+            let (ctx, cpu, budget, entry_index) = (params[0], params[1], params[2], params[3]);
             let sig_load = b.import_signature(self.load_sig.clone());
             let sig_store = b.import_signature(self.store_sig.clone());
             let sig_exec = b.import_signature(self.exec_sig.clone());
             let read_tab = b.ins().load(I64, MemFlagsData::trusted(), ctx, offset_of!(JitCtx, read_table) as i32);
             let write_tab = b.ins().load(I64, MemFlagsData::trusted(), ctx, offset_of!(JitCtx, write_table) as i32);
+            let steps = b.declare_var(I32);
             let mut t = Tx {
                 b,
                 ctx,
                 cpu,
                 read_tab,
                 write_tab,
+                budget,
+                steps,
                 sig_load,
                 sig_store,
                 sig_exec,
                 vars: [None; SLOTS],
                 loaded: [false; SLOTS],
+                labels: Vec::new(),
                 stubs: Vec::new(),
             };
-            t.block(block, pc);
+            t.region(region, entry_index);
             t.emit_stubs();
             t.b.seal_all_blocks();
             t.b.finalize(self.module.target_config());
@@ -152,30 +167,50 @@ impl Compiler {
         let id = self.module.declare_anonymous_function(&self.block_sig).map_err(|e| e.to_string())?;
         self.module.define_function(id, &mut self.ctx).map_err(|e| format!("{e:?}"))?;
         if dump {
-            let guest: String = block
-                .iter()
-                .enumerate()
-                .map(|(i, insn)| format!("  {:08x}: {:08x}  {}\n", pc.wrapping_add(4 * i as u32), insn.word, insn.ins.simplified()))
-                .collect();
+            let mut guest = String::new();
+            for block in region {
+                for (i, insn) in block.insns.iter().enumerate() {
+                    let pc = block.start.wrapping_add(4 * i as u32);
+                    guest += &format!("  {pc:08x}: {:08x}  {}\n", insn.word, insn.ins.simplified());
+                }
+                guest += "  --\n";
+            }
             let host = self.ctx.compiled_code().and_then(|c| c.vcode.clone()).unwrap_or_default();
-            log::trace!(target: "jit_ir", "block at {pc:#010x}, {} instructions\n{guest}--- Cranelift IR ---\n{ir}--- host code ---\n{host}", block.len());
+            log::trace!(target: "jit_ir", "region at {:#010x}, {} blocks\n{guest}--- Cranelift IR ---\n{ir}--- host code ---\n{host}", region[0].start, region.len());
         }
         self.code_bytes += self.ctx.compiled_code().map_or(0, |c| c.code_info().total_size as usize);
         self.module.clear_context(&mut self.ctx);
         self.module.finalize_definitions().map_err(|e| e.to_string())?;
         let code = self.module.get_finalized_function(id);
         // SAFETY: the function was built with `block_sig`, which is the
-        // host's C calling convention for (pointer, pointer) -> u32.
+        // host's C calling convention for (pointer, pointer, u32, u32) -> u32.
         Ok(unsafe { std::mem::transmute::<*const u8, BlockFn>(code) })
     }
 }
 
-/// Exit paths, emitted after the block body.
+/// Which clock register `Tx::time_now` reads.
+#[derive(Clone, Copy, PartialEq)]
+enum Clock {
+    Timebase,
+    Decrementer,
+}
+
+/// Exit paths, emitted after the region body. `executed` counts the
+/// instructions of the current guest block up to and including the one
+/// that exits; the instructions of earlier blocks are in the `steps`
+/// variable.
 enum Stub {
-    /// Instruction `steps - 1` raised an exception.
-    Raised { steps: u32 },
-    /// Leave after `steps` instructions, continuing at `next_pc`.
-    Exit { steps: u32, next_pc: u32 },
+    /// The instruction at `pc` raised an exception.
+    Raised { executed: u32, pc: u32 },
+    /// A helper asked to stop: continue at `next_pc`.
+    Exit { executed: u32, next_pc: u32 },
+}
+
+/// Where a branch goes.
+#[derive(Clone, Copy)]
+enum Target {
+    Known(u32),
+    Computed(Value),
 }
 
 /// How a loaded value is converted before it reaches the register.
@@ -196,19 +231,25 @@ enum Addr {
     XUpdate,
 }
 
-/// The translator for one block.
+/// The translator for one region.
 struct Tx<'a> {
     b: FunctionBuilder<'a>,
     ctx: Value,
     cpu: Value,
     read_tab: Value,
     write_tab: Value,
+    /// Most instructions this call may execute (batch end, decrementer).
+    budget: Value,
+    /// Instructions executed in the guest blocks before the current one.
+    steps: Variable,
     sig_load: SigRef,
     sig_store: SigRef,
     sig_exec: SigRef,
     vars: [Option<Variable>; SLOTS],
     /// The variable holds the slot's current value (else read the struct).
     loaded: [bool; SLOTS],
+    /// Guest block start → (its Cranelift block, its length).
+    labels: Vec<(u32, Block, u32)>,
     stubs: Vec<(Block, Stub)>,
 }
 
@@ -340,6 +381,37 @@ impl Tx<'_> {
         self.b.ins().band_imm_u(v, 1)
     }
 
+    /// The timebase (64 bits) or the decrementer (low 32 bits of the
+    /// result) as the interpreter would see it at instruction number
+    /// `index` (0-based) of the current guest block: the clock ticked once
+    /// per instruction executed since the region was entered, and the
+    /// struct holds the value at the region entry. Each tick adds one to
+    /// the prescaler; every `tb_divider` of them make one timebase tick
+    /// (see `Cpu::tick`).
+    fn time_now(&mut self, index: u32, clock: Clock) -> Value {
+        let enabled = self.b.ins().uload8(I32, MemFlagsData::trusted(), self.cpu, offset_of!(Cpu, tb_enabled) as i32);
+        let prescaler = self.b.ins().load(I32, MemFlagsData::trusted(), self.cpu, offset_of!(Cpu, tb_prescaler) as i32);
+        let divider = self.b.ins().load(I32, MemFlagsData::trusted(), self.cpu, offset_of!(Cpu, tb_divider) as i32);
+        let before = self.b.use_var(self.steps);
+        let before = self.b.ins().iadd_imm_u(before, index as i64);
+        let elapsed = self.b.ins().iadd(prescaler, before);
+        let ticks = self.b.ins().udiv(elapsed, divider);
+        let zero = self.c(0);
+        let ticks = self.b.ins().select(enabled, ticks, zero);
+        let ticks = self.b.ins().uextend(I64, ticks);
+        match clock {
+            Clock::Timebase => {
+                let tb = self.b.ins().load(I64, MemFlagsData::trusted(), self.cpu, offset_of!(Cpu, tb) as i32);
+                self.b.ins().iadd(tb, ticks)
+            }
+            Clock::Decrementer => {
+                let dec = self.b.ins().load(I32, MemFlagsData::trusted(), self.cpu, offset_of!(Cpu, dec) as i32);
+                let dec = self.b.ins().uextend(I64, dec);
+                self.b.ins().isub(dec, ticks)
+            }
+        }
+    }
+
     /// Tail of XO-form arithmetic with OE=0: rD, then CR0 if Rc=1.
     fn finish_xo(&mut self, ins: Ins, v: Value) {
         self.write(ins.field_rd() as usize, v);
@@ -357,31 +429,86 @@ impl Tx<'_> {
     }
 
     // ------------------------------------------------------------------
-    // The block
+    // The region
     // ------------------------------------------------------------------
 
-    fn block(&mut self, block: &[Insn], start: u32) {
-        for (i, insn) in block.iter().enumerate() {
-            let pc = start.wrapping_add(4 * i as u32);
-            let steps = i as u32 + 1;
+    fn region(&mut self, region: &[GuestBlock], entry_index: Value) {
+        for block in region {
+            let label = self.b.create_block();
+            self.labels.push((block.start, label, block.insns.len() as u32));
+        }
+        let zero = self.c(0);
+        self.b.def_var(self.steps, zero);
+        // Jump to the entry block: a jump table indexed by `entry`. Every
+        // edge needs its own BlockCall (the SSA builder appends variable
+        // arguments to each), so the default target gets a separate one.
+        let calls: Vec<_> = self.labels.iter().map(|&(_, label, _)| self.b.func.dfg.block_call(label, &[])).collect();
+        let default = self.b.func.dfg.block_call(self.labels[0].1, &[]);
+        let table = self.b.create_jump_table(JumpTableData::new(default, &calls));
+        self.b.ins().br_table(entry_index, table);
+        let labels = self.labels.clone();
+        for (block, &(_, label, _)) in region.iter().zip(&labels) {
+            self.b.switch_to_block(label);
+            // A guest block can be entered from several places: it re-reads
+            // the registers it uses (the struct is always up to date).
+            self.loaded = [false; SLOTS];
+            self.guest_block(block);
+        }
+    }
+
+    fn guest_block(&mut self, block: &GuestBlock) {
+        let len = block.insns.len() as u32;
+        for (i, insn) in block.insns.iter().enumerate() {
+            let pc = block.start.wrapping_add(4 * i as u32);
+            let executed = i as u32 + 1;
             match insn.kind {
-                Kind::Native => self.native(insn.ins, steps, pc),
-                Kind::Helper => self.helper(insn.word, steps, pc),
-                Kind::Branch => return self.branch(insn.ins, steps, pc),
+                Kind::Native => self.native(insn.ins, executed, pc),
+                Kind::Helper => self.helper(insn.word, executed, pc),
+                Kind::Branch => return self.branch(insn.ins, len, pc),
                 Kind::Stop => unreachable!("the scanner never includes Stop instructions"),
             }
         }
-        // No branch at the end: continue after the last instruction.
-        let next = start.wrapping_add(4 * block.len() as u32);
-        let next = self.c(next);
-        self.finish(next, block.len() as u32);
+        // No branch at the end: continue with the next instruction.
+        let total = self.total(len);
+        self.goto(Target::Known(block.start.wrapping_add(4 * len)), total);
     }
 
-    /// Leave the block after `steps` instructions, at guest address `next`.
-    fn finish(&mut self, next: Value, steps: u32) {
+    /// Instructions executed once the current guest block's first
+    /// `executed` instructions are done.
+    fn total(&mut self, executed: u32) -> Value {
+        let before = self.b.use_var(self.steps);
+        self.b.ins().iadd_imm_u(before, executed as i64)
+    }
+
+    /// Continue at `target` with `total` instructions executed: jump to that
+    /// guest block if it is in the region and still fits in the budget,
+    /// otherwise return to the dispatcher.
+    fn goto(&mut self, target: Target, total: Value) {
+        if let Target::Known(pc) = target {
+            if let Some(&(_, label, len)) = self.labels.iter().find(|l| l.0 == pc) {
+                let after = self.b.ins().iadd_imm_u(total, len as i64);
+                let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, after, self.budget);
+                let (stay, leave) = (self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(fits, stay, &[], leave, &[]);
+                self.b.switch_to_block(stay);
+                self.b.def_var(self.steps, total);
+                self.b.ins().jump(label, &[]);
+                self.b.switch_to_block(leave);
+                let next = self.c(pc);
+                return self.finish(next, total);
+            }
+        }
+        let next = match target {
+            Target::Known(pc) => self.c(pc),
+            Target::Computed(v) => v,
+        };
+        self.finish(next, total);
+    }
+
+    /// Return to the dispatcher: `total` instructions done, continue at `next`.
+    fn finish(&mut self, next: Value, total: Value) {
         self.b.ins().store(MemFlagsData::trusted(), next, self.cpu, offset_of!(Cpu, pc) as i32);
-        let r = self.c(steps);
-        self.b.ins().return_(&[r]);
+        self.b.ins().return_(&[total]);
     }
 
     fn stub(&mut self, stub: Stub) -> Block {
@@ -394,13 +521,19 @@ impl Tx<'_> {
         for (block, stub) in std::mem::take(&mut self.stubs) {
             self.b.switch_to_block(block);
             match stub {
-                Stub::Raised { steps } => {
-                    let r = self.c(steps | RAISED);
+                Stub::Raised { executed, pc } => {
+                    let total = self.total(executed);
+                    let fault = self.c(pc);
+                    self.b.ins().store(MemFlagsData::trusted(), fault, self.ctx, offset_of!(JitCtx, fault_pc) as i32);
+                    let r = self.b.ins().bor_imm_u(total, RAISED as i64);
                     self.b.ins().return_(&[r]);
                 }
-                Stub::Exit { steps, next_pc } => {
+                Stub::Exit { executed, next_pc } => {
+                    let total = self.total(executed);
                     let next = self.c(next_pc);
-                    self.finish(next, steps);
+                    self.b.ins().store(MemFlagsData::trusted(), next, self.cpu, offset_of!(Cpu, pc) as i32);
+                    let r = self.b.ins().bor_imm_u(total, EARLY as i64);
+                    self.b.ins().return_(&[r]);
                 }
             }
         }
@@ -409,14 +542,14 @@ impl Tx<'_> {
     /// After a helper returned `status`: on EXCEPTION leave through a
     /// `Raised` stub; otherwise run `then` (the instruction's remaining
     /// effects), and on EXIT leave through an `Exit` stub.
-    fn after_helper(&mut self, status: Value, steps: u32, pc: u32, then: impl FnOnce(&mut Self), join: Block) {
-        let raised = self.stub(Stub::Raised { steps });
+    fn after_helper(&mut self, status: Value, executed: u32, pc: u32, then: impl FnOnce(&mut Self), join: Block) {
+        let raised = self.stub(Stub::Raised { executed, pc });
         let ok = self.b.create_block();
         let is_exc = self.b.ins().icmp_imm_u(IntCC::Equal, status, EXCEPTION as i64);
         self.b.ins().brif(is_exc, raised, &[], ok, &[]);
         self.b.switch_to_block(ok);
         then(self);
-        let exit = self.stub(Stub::Exit { steps, next_pc: pc.wrapping_add(4) });
+        let exit = self.stub(Stub::Exit { executed, next_pc: pc.wrapping_add(4) });
         let is_exit = self.b.ins().icmp_imm_u(IntCC::Equal, status, EXIT as i64);
         self.b.ins().brif(is_exit, exit, &[], join, &[]);
     }
@@ -620,48 +753,48 @@ impl Tx<'_> {
         cond
     }
 
-    fn branch(&mut self, ins: Ins, steps: u32, pc: u32) {
-        let link = |t: &mut Self| {
-            if ins.field_lk() {
-                let ret = t.c(pc.wrapping_add(4));
-                t.write(LR, ret);
-            }
-        };
+    /// The branch ending a guest block of `len` instructions, at `pc`.
+    fn branch(&mut self, ins: Ins, len: u32, pc: u32) {
         let (cond, target) = match ins.op {
             Opcode::B => {
                 let offset = ins.field_li() as u32;
-                let target = if ins.field_aa() { offset } else { pc.wrapping_add(offset) };
-                (None, self.c(target))
+                (None, Target::Known(if ins.field_aa() { offset } else { pc.wrapping_add(offset) }))
             }
             Opcode::Bc => {
                 let cond = self.branch_condition(ins.field_bo(), ins.field_bi(), true);
                 let offset = ins.field_bd() as i32 as u32;
-                let target = if ins.field_aa() { offset } else { pc.wrapping_add(offset) };
-                (cond, self.c(target))
+                (cond, Target::Known(if ins.field_aa() { offset } else { pc.wrapping_add(offset) }))
             }
             Opcode::Bclr => {
                 let cond = self.branch_condition(ins.field_bo(), ins.field_bi(), true);
                 let lr = self.read(LR); // before LK overwrites it
                 let word = self.c(!3);
-                (cond, self.b.ins().band(lr, word))
+                (cond, Target::Computed(self.b.ins().band(lr, word)))
             }
             Opcode::Bcctr => {
                 let cond = self.branch_condition(ins.field_bo(), ins.field_bi(), false);
                 let ctr = self.read(CTR);
                 let word = self.c(!3);
-                (cond, self.b.ins().band(ctr, word))
+                (cond, Target::Computed(self.b.ins().band(ctr, word)))
             }
             _ => unreachable!("not a branch: {:?}", ins.op),
         };
-        link(self);
-        let next = match cond {
-            None => target,
+        if ins.field_lk() {
+            let ret = self.c(pc.wrapping_add(4));
+            self.write(LR, ret);
+        }
+        let total = self.total(len);
+        match cond {
+            None => self.goto(target, total),
             Some(c) => {
-                let fall = self.c(pc.wrapping_add(4));
-                self.b.ins().select(c, target, fall)
+                let (taken, not_taken) = (self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(c, taken, &[], not_taken, &[]);
+                self.b.switch_to_block(taken);
+                self.goto(target, total);
+                self.b.switch_to_block(not_taken);
+                self.goto(Target::Known(pc.wrapping_add(4)), total);
             }
-        };
-        self.finish(next, steps);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -948,9 +1081,27 @@ impl Tx<'_> {
                 let v = self.b.ins().bor(kept, new);
                 self.write(CR, v);
             }
-            Mfspr => {
-                let slot = spr_slot(ins.field_spr());
-                let v = self.read(slot);
+            Mfspr | Mftb => {
+                let n = if ins.op == Mftb { ins.field_tbr() } else { ins.field_spr() };
+                let v = match n {
+                    crate::spr::TBL_READ => {
+                        let tb = self.time_now(steps - 1, Clock::Timebase);
+                        self.b.ins().ireduce(I32, tb)
+                    }
+                    crate::spr::TBU_READ => {
+                        let tb = self.time_now(steps - 1, Clock::Timebase);
+                        let hi = self.b.ins().ushr_imm_u(tb, 32);
+                        self.b.ins().ireduce(I32, hi)
+                    }
+                    crate::spr::DEC => {
+                        let dec = self.time_now(steps - 1, Clock::Decrementer);
+                        self.b.ins().ireduce(I32, dec)
+                    }
+                    other => {
+                        let slot = spr_slot(other);
+                        self.read(slot)
+                    }
+                };
                 self.write(rd, v);
             }
             Mtspr => {

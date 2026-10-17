@@ -363,3 +363,35 @@ fn translated_mode_with_tlb_misses_and_faults() {
     assert!(cpu.exception_counts[0x12] > 100, "DTLB misses: {}", cpu.exception_counts[0x12]);
     assert!(cpu.exception_counts[0x14] > 100, "DTLB errors: {}", cpu.exception_counts[0x14]);
 }
+
+/// `mftb`/`mftbu`/`mfdec` inside translated blocks must read the clock the
+/// interpreter would see at that instruction (block start + instructions
+/// before it). In user mode `mfdec` raises a Program exception.
+#[test]
+fn timebase_and_decrementer_reads() {
+    for user in [false, true] {
+        let (cpu, ..) = both(
+            &[
+                "addi r4, r4, 1",       // loop:
+                "mftb r3, 268",
+                "xor r9, r9, r3",
+                "mftb r5, 269",       // mftbu
+                "add r9, r9, r5",
+                "mfspr r6, 22",         // mfdec
+                "add r7, r3, r6",
+                "subf r8, r7, r9",
+                "b -32",
+            ],
+            |cpu, board| {
+                cpu.msr = msr::ME | if user { msr::PR } else { 0 };
+                cpu.tb_enabled = true;
+                cpu.tb = 0xFFFF_FF00; // TBU changes during the run
+                cpu.dec = 5_000;
+                place(board, 0x700, &["addi r20, r20, 1", "mfsrr0 r21", "addi r21, r21, 4", "mtsrr0 r21", "rfi"]);
+            },
+            40_000,
+        );
+        assert!(cpu.tb > 0x1_0000_0000, "the timebase wrapped into TBU");
+        assert_eq!(cpu.gpr[20] > 0, user, "program exceptions in user mode only");
+    }
+}

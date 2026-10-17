@@ -81,8 +81,8 @@ pub trait Platform {
     /// A host pointer to the 4 KB physical page containing `pa`, if the page
     /// is plain memory: reading (and, for `write`, writing) it directly must
     /// be exactly equivalent to `read*`/`write*`. For `write`, return `None`
-    /// for pages watched with [`Platform::watch_code_page`], so that stores to
-    /// translated code go through `write*` and get reported.
+    /// for pages with code watched by [`Platform::watch_code`], so that
+    /// stores to them go through `write*` and get checked.
     ///
     /// The pointer must stay valid until [`Platform::memory_map_epoch`]
     /// changes.
@@ -96,16 +96,18 @@ pub trait Platform {
         0
     }
 
-    /// The JIT is about to translate code at physical address `pa`. Return
-    /// an identifier of the host page behind it (aliases of the same memory
-    /// must give the same identifier) if the platform will report every
-    /// later write to that page, by anyone, through
-    /// [`Platform::take_code_write`]. `None`: don't translate code there.
-    fn watch_code_page(&mut self, _pa: u32) -> Option<u32> {
+    /// The JIT translated the `len` bytes of code at physical address `pa`
+    /// (whole instruction words inside one 4 KB page). Return an identifier of the host page behind
+    /// it (aliases of the same memory must give the same identifier) if the
+    /// platform will report every later write to those bytes, by anyone,
+    /// through [`Platform::take_code_write`] (see [`jit::CodeWatch`], which
+    /// does the bookkeeping). `None`: don't translate code there.
+    fn watch_code(&mut self, _pa: u32, _len: u32) -> Option<u32> {
         None
     }
 
-    /// Next watched page written since the last call (its watch ends).
+    /// Next watched word written since the last call (its watch ends), as
+    /// [`jit::word_id`]`(page, offset)`.
     fn take_code_write(&mut self) -> Option<u32> {
         None
     }
@@ -492,6 +494,7 @@ impl Cpu {
     /// Exactly the effect of `n` calls to `tick()` (the clock after `n`
     /// executed instructions), in one go. Used by the JIT, which runs a
     /// whole block and then lets its time pass.
+    #[inline]
     pub(crate) fn advance_clock(&mut self, n: u64) {
         self.cycles += n;
         if !self.tb_enabled {
@@ -517,6 +520,7 @@ impl Cpu {
     /// `dec_pending` (that one included): the JIT only runs a block of `n`
     /// instructions with `MSR[EE]=1` if this is at least `n`, so the
     /// decrementer interrupt can't fall inside the block.
+    #[inline]
     pub(crate) fn instructions_until_decrementer_request(&self) -> u64 {
         if !self.tb_enabled {
             return u64::MAX;

@@ -119,5 +119,5 @@ fn jit_boots_rommon_exactly_like_the_interpreter() {
     assert_eq!((jit.2, jit.3, jit.4, jit.5), (interp.2, interp.3, interp.4, interp.5), "timebase and registers");
     assert_eq!(jit.6, interp.6, "console output");
     assert!(jit.7 == interp.7, "RAM contents");
-    assert!(jit.8.contains("blocks translated"));
+    assert!(jit.8.contains("regions translated"));
 }

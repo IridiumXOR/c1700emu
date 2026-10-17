@@ -69,14 +69,14 @@ impl Platform for TestBoard {
     fn write8(&mut self, addr: u32, v: u8) -> Result<(), BusError> {
         self.sized_accesses[0] += 1;
         let r = self.range(addr, 1)?;
-        self.code.note_write(addr >> 12);
+        self.code.note_write(addr >> 12, addr);
         self.ram[r.start] = v;
         Ok(())
     }
     fn write16(&mut self, addr: u32, v: u16) -> Result<(), BusError> {
         self.sized_accesses[1] += 1;
         let r = self.range(addr, 2)?;
-        self.code.note_write(addr >> 12);
+        self.code.note_write(addr >> 12, addr);
         self.ram[r].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
@@ -87,7 +87,7 @@ impl Platform for TestBoard {
             return Ok(());
         }
         let r = self.range(addr, 4)?;
-        self.code.note_write(addr >> 12);
+        self.code.note_write(addr >> 12, addr);
         self.ram[r].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
@@ -106,9 +106,9 @@ impl Platform for TestBoard {
         }
         Some(self.ram[page as usize..].as_mut_ptr())
     }
-    fn watch_code_page(&mut self, pa: u32) -> Option<u32> {
+    fn watch_code(&mut self, pa: u32, len: u32) -> Option<u32> {
         (pa < RAM_SIZE).then(|| {
-            self.code.watch(pa >> 12);
+            self.code.watch(pa >> 12, pa, len);
             pa >> 12
         })
     }

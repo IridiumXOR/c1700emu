@@ -42,7 +42,7 @@ pub(super) fn mode_index(msr: u32) -> usize {
 }
 
 /// Fast tables for loads and for stores, one pair per mode. A store entry
-/// is only ever made for a page with no translated code, so stores to code
+/// is only ever made for a page with no watched code, so stores to code
 /// always take the helper path, where the platform notices them.
 pub(super) struct FastTables {
     pub read: [Box<[FastEntry]>; 3],
@@ -69,7 +69,7 @@ impl FastTables {
         }
     }
 
-    /// A page started holding code: no store entry may point at it.
+    /// New code is watched: no store entry may point at its page.
     pub fn flush_writes(&mut self) {
         for t in self.write.iter_mut() {
             t.fill(EMPTY);
@@ -117,8 +117,9 @@ pub(super) struct JitCtx {
     pub cpu: *mut Cpu,
     /// The platform, as a `*mut P` of the type the helpers were made for.
     pub sys: *mut (),
-    /// The exception a helper raised.
+    /// The exception a helper raised, and the address of the instruction.
     pub exception: Option<Exception>,
+    pub fault_pc: u32,
     /// Fill the fast tables from the helpers (off in the lockstep checker,
     /// which must see every access).
     pub fill: bool,
@@ -126,7 +127,7 @@ pub(super) struct JitCtx {
     /// Platform memory map and MMU state the tables were filled under.
     pub map_epoch: u64,
     pub mmu_generation: u64,
-    /// Watched pages reported written, not yet invalidated.
+    /// Watched words reported written, not yet invalidated.
     pub code_writes: Vec<u32>,
     /// A helper ran since the dispatcher last looked: platform, MMU or
     /// memory map may have changed. (Translated code alone can't change
@@ -143,6 +144,7 @@ impl JitCtx {
             cpu: std::ptr::null_mut(),
             sys: std::ptr::null_mut(),
             exception: None,
+            fault_pc: 0,
             fill: true,
             tables: FastTables::new(),
             map_epoch: 0,
