@@ -2,8 +2,8 @@
 //!
 //! * **stdio**: the terminal is put in raw mode so every key goes straight to
 //!   the emulated UART. `Ctrl-]` is the escape key:
-//!   `Ctrl-] q` quits, `Ctrl-] b` sends a BREAK, `Ctrl-] Ctrl-]` sends a
-//!   literal `Ctrl-]`.
+//!   `Ctrl-] q` quits, `Ctrl-] b` sends a BREAK, `Ctrl-] p` restarts the
+//!   `--profile` counters, `Ctrl-] Ctrl-]` sends a literal `Ctrl-]`.
 //! * **TCP** (`--tcp PORT`): `telnet localhost PORT` (or `nc`). We negotiate
 //!   character mode, strip telnet commands, and map telnet's `send brk` to a
 //!   serial BREAK.
@@ -27,6 +27,8 @@ pub enum ConsoleEvent {
     Input(u8),
     Break,
     Quit,
+    /// `Ctrl-] p`: restart the `--profile` counters ("profile from now on").
+    ProfileReset,
 }
 
 pub struct Console {
@@ -121,6 +123,7 @@ fn stdin_reader(tx: Sender<ConsoleEvent>) {
             match b {
                 b'q' | b'Q' => Some(ConsoleEvent::Quit),
                 b'b' | b'B' => Some(ConsoleEvent::Break),
+                b'p' | b'P' => Some(ConsoleEvent::ProfileReset),
                 ESCAPE_KEY => Some(ConsoleEvent::Input(ESCAPE_KEY)),
                 _ => None,
             }

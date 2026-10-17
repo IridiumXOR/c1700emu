@@ -147,7 +147,8 @@ The bigger wins for the *experience* of using the emulator aren't the JIT:
    cost, the decode path, a direct DRAM fast path, batching the timebase.
    Expected 1.5-2×.
 3. **IOS idle detection**: recognise the idle loop and advance virtual time
-   to the next timer interrupt. A big win whenever the router waits.
+   to the next timer interrupt. **Done** (chapter 15): boot 318 → 206 s, an
+   idle router uses ~0% CPU.
 4. **Pre-decoded blocks** (14.4), 2-3× on top, and the foundation for:
 5. **A Cranelift JIT for hot blocks**, verified in **lockstep**: run each
    block in both the JIT and the interpreter on a copy of the state and

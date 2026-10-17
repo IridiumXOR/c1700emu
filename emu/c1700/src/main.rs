@@ -97,6 +97,16 @@ struct Args {
     #[arg(long)]
     tcp: Option<u16>,
 
+    /// Idle detection anchor: `auto` (known images, code-checked) or the
+    /// hex address of IOS's scheduler loop head. See docs ch. 15.
+    #[arg(long, default_value = "auto")]
+    idle_pc: c1700emu::idle::AnchorChoice,
+
+    /// Idle detection: realtime (skip idle time, sleep so the router keeps
+    /// the wall clock) or off.
+    #[arg(long, value_enum, default_value = "realtime")]
+    idle: c1700emu::idle::IdleMode,
+
     /// Log every access to a physical address range, START:LEN in hex
     /// (e.g. 07040000:4000), with the PC of the instruction (or DMA).
     #[arg(long, value_parser = parse_watch)]
@@ -135,6 +145,10 @@ struct Args {
     /// Count executed instructions per ROM address and print the hot spots at exit.
     #[arg(long)]
     profile: bool,
+
+    /// With --profile: also write every sampled PC (whole run and window) here.
+    #[arg(long)]
+    profile_dump: Option<PathBuf>,
 
     /// Write logs to this file instead of stderr.
     #[arg(long)]
@@ -279,6 +293,8 @@ fn main() -> Result<(), String> {
         if listing.is_empty() { "empty".to_string() } else { listing.join(", ") }
     );
 
+    machine.idle_auto = args.idle_pc == c1700emu::idle::AnchorChoice::Auto;
+    machine.idle = c1700emu::idle::Idle::new(args.idle, Some(args.idle_pc.clone()));
     if let Some((start, len)) = args.watch {
         machine.board.watch = Some(c1700emu::board::Watch { start, end: start.wrapping_add(len), pc: u32::MAX });
     }
@@ -294,6 +310,11 @@ fn main() -> Result<(), String> {
         log::info!("stopped: {stop:?} after {} instructions", emu.machine.cpu.cycles);
     }
     emu.pump_console();
+    if let Some(path) = &args.profile_dump {
+        if let Err(e) = std::fs::write(path, emu.machine.profile_dump()) {
+            log::error!("profile dump {}: {e}", path.display());
+        }
+    }
     let mut report = emu.machine.profile_report();
     if args.stats {
         report += &emu.machine.stats_report();

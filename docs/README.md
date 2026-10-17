@@ -23,6 +23,7 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 12 | [The MPC8xx MMU](12-mmu.md) | software-loaded TLBs, table-walk assist, how IOS pins its memory map, the emulation and its tests |
 | 13 | [IOS networking](13-ios-networking.md) | why received frames got stuck, the `--watch` tool, the IDMA copy engine, the first ping |
 | 14 | [Speed and JIT](14-speed-and-jit.md) | where an interpreter spends its time, how a JIT works, what it would take here, the plan |
+| 15 | [Profiling and idle detection](15-profiling-and-idle.md) | guest and host profiles, how IOS idles, the idle-PC detector, results |
 
 Reference material:
 

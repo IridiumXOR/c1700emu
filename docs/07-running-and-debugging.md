@@ -41,11 +41,14 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--tcp PORT` | also serve the console on telnet |
 | `--aux-tcp PORT` | serve the AUX port (DUART channel B) on telnet; without it AUX output goes to the log |
 | `--watch START:LEN` | (hex) log every bus access to a physical range with the PC, or `DMA` — a watchpoint (chapter 13) |
+| `--idle MODE` | idle detection: `realtime` (default: skip IOS's idle loop, sleep so the router keeps the wall clock) or `off` (chapter 15) |
+| `--idle-pc auto\|ADDR` | idle anchor: `auto` (default; known images, code-checked) or the hex address of IOS's scheduler loop head |
+| `--profile-dump FILE` | with `--profile`: write every sampled PC (whole run and `Ctrl-] p` window) |
 | `--no-stdio` | don't use the terminal (TCP only) |
 | `--gdb PORT` | wait for GDB before the first instruction |
 | `-n N` | stop after N instructions |
 | `--trace` | log every instruction (use with `--log`, very verbose) |
-| `--profile` | per-address execution counts of the ROM, printed at exit |
+| `--profile` | per-address execution counts of the ROM, plus PC samples over all addresses (whole run and the window since `Ctrl-] p`), printed at exit |
 | `--log PATH`, `--log-level L` | logging (`RUST_LOG` also works, e.g. `RUST_LOG=c1700emu::board=debug`) |
 
 ## 7.2 The console

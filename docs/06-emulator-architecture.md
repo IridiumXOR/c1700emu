@@ -128,8 +128,9 @@ instructions (`DEVICE_SYNC_INTERVAL`). Consequences:
   every 960 000 instructions, regardless of host speed;
 * when the guest spins waiting for a key (the UART counts consecutive
   "no data" LSR polls), the emulator sleeps 5 ms per slice so it does not
-  burn a host core. IOS's idle loop is not detected yet: an idle router
-  still runs at full speed (chapter 14).
+  burn a host core. IOS's idle loop is detected separately (`idle.rs`,
+  chapter 15): virtual time jumps to the next timer interrupt, and in
+  realtime mode the emulator sleeps instead of spinning.
 
 ## 6.6 Resets
 
@@ -165,5 +166,5 @@ EHRS|ESRS (0xC0000000), the documented reset value.
   ~2.5 min self-decompression, ~2.5 min initialisation.
 * The `mftb` busy-waits of the ROM are fast-forwarded (`fastforward.rs`,
   chapter 8): boot 6.9 → 5.2 s, writing an image to flash ~70 → ~4 s.
-* Where the time could go: chapter 14 (snapshots, interpreter profiling,
-  idle detection, and what a JIT would involve).
+* Measured profiles and idle detection (boot 318 → 206 s, idle router
+  ~0% CPU): chapter 15. Further options, including a JIT: chapter 14.

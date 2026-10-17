@@ -344,6 +344,22 @@ impl Mpc860 {
         source * if sccr & SCCR_RTDIV != 0 { 512 } else { 4 }
     }
 
+    /// CPU cycles until the PIT next requests an interrupt (PISCR[PS] set
+    /// with PIE enabled): `None` if it can't, `Some(0)` if one is pending.
+    /// Used to skip idle time without jumping over a timer interrupt.
+    pub fn cycles_until_pit_interrupt(&self) -> Option<u64> {
+        let piscr = self.load16(PISCR);
+        if piscr & 0x0001 == 0 || piscr & 0x0004 == 0 {
+            return None; // PTE or PIE clear
+        }
+        if piscr & 0x0080 != 0 {
+            return Some(0); // PS already set
+        }
+        let period = self.cycles_per_pit_tick();
+        let ticks_left = self.pit.count.max(1) as u64; // count reaches zero after this many ticks
+        Some((ticks_left - 1) * period + (period - self.pit.acc.min(period)))
+    }
+
     /// Advance on-chip timers by `cycles` CPU cycles.
     pub fn advance(&mut self, cycles: u64) {
         let piscr = self.load16(PISCR);

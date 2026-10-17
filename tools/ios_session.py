@@ -7,7 +7,9 @@ emulator prints --stats.
 IMAGE "-" means the image boots from flash (nothing to type in ROMMON);
 otherwise it is fetched with `tftpdnld -r` (the emulator needs --tftp-root).
 CMDFILE has one IOS command per line (default: show version/interfaces/
-diag/flash:). A line "wait TEXT" waits up to 60 s for TEXT before going on.
+diag/flash:). Directives: "wait TEXT" waits up to 60 s for TEXT,
+"sleep N" lets N seconds pass, "profile-reset" sends Ctrl-] p (restart
+the --profile counters).
 LOG gets the console; LOG.stderr the emulator's stderr (stats).
 Environment: LIMIT = overall deadline in seconds (default 1500).
 """
@@ -71,6 +73,15 @@ if r == "[yes/no]:":
         for c in cmds:
             if c.startswith("wait "):
                 mark(f"waiting for {c[5:]!r}: {wait_for(c[5:], limit=60)!r}")
+                continue
+            if c.startswith("sleep "):
+                end = time.time() + float(c[6:])
+                while time.time() < end:
+                    pump(); time.sleep(0.2)
+                mark(f"slept {c[6:]} s")
+                continue
+            if c == "profile-reset":
+                send("\x1dp"); mark("profile counters reset (Ctrl-] p)")
                 continue
             send(c + "\r")
             wait_for("#", ">", limit=180)

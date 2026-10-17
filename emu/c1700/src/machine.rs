@@ -7,10 +7,11 @@
 
 use crate::board::{Board, BoardConfig, nvram::Nvram};
 use crate::fastforward::FastForward;
+use crate::idle::{Idle, IdleMode};
 use crate::mpc860::rsr;
 use powerpc::{Extensions, Ins};
-use ppc8xx::{Cpu, StepOutcome};
-use std::collections::BTreeSet;
+use ppc8xx::{Cpu, Platform, StepOutcome, msr};
+use std::collections::{BTreeSet, HashMap};
 
 /// Instructions between two device updates (timers, interrupt line).
 pub const DEVICE_SYNC_INTERVAL: u64 = 256;
@@ -41,9 +42,25 @@ pub struct Machine {
     pub resets: u32,
     /// Optional execution profile: one counter per ROM instruction word.
     pub profile: Option<Vec<u64>>,
+    /// Sampled PCs over the whole address space (every `SAMPLE_PERIOD`
+    /// instructions), for code outside the ROM such as IOS: the whole run,
+    /// and the window since the last `Ctrl-] p` (if any).
+    pc_samples: Option<HashMap<u32, u64>>,
+    pc_window: Option<(u64, HashMap<u32, u64>)>,
+    sample_countdown: u32,
     /// Skips the ROM's timebase busy-wait loops (see `fastforward.rs`).
     pub fast_forward: FastForward,
+    /// Skips IOS's idle scheduler loop (see `idle.rs`).
+    pub idle: Idle,
+    /// The idle anchor is chosen automatically (re-checked after resets).
+    pub idle_auto: bool,
+    /// Realtime pacing: stop a `run` once `cpu.cycles` passes this.
+    pub pace_limit: Option<u64>,
 }
+
+/// One PC sample every this many instructions. A prime, so the sampling
+/// can't lock onto the period of a loop.
+const SAMPLE_PERIOD: u32 = 997;
 
 /// Address range covered by the execution profile (the boot ROM).
 const PROFILE_BASE: u32 = 0xFFF0_0000;
@@ -59,7 +76,13 @@ impl Machine {
             unsynced: 0,
             resets: 0,
             profile: None,
+            pc_samples: None,
+            pc_window: None,
+            sample_countdown: SAMPLE_PERIOD,
             fast_forward: FastForward::disabled(),
+            idle: Idle::new(IdleMode::Off, None),
+            idle_auto: false,
+            pace_limit: None,
         };
         m.power_on();
         m.fast_forward = FastForward::new(|a| m.board.peek_word(a));
@@ -71,6 +94,7 @@ impl Machine {
         self.board.power_on_reset();
         self.cpu = Cpu::new();
         self.cpu.hard_reset(true); // hard reset config word: IP=1 → boot at 0xFFF00100
+        self.idle.reset(self.idle_auto);
         self.sync_devices();
     }
 
@@ -84,6 +108,7 @@ impl Machine {
         self.cpu.hard_reset(true);
         self.cpu.tb = tb;
         self.cpu.cycles = cycles;
+        self.idle.reset(self.idle_auto);
         self.sync_devices();
     }
 
@@ -103,6 +128,16 @@ impl Machine {
             if self.trace {
                 self.trace_instruction(pc);
             }
+            if self.idle.is_candidate(pc) {
+                let code = [0, 4, 8, 12].map(|o| self.peek_word(pc + o).unwrap_or(0));
+                self.idle.check_candidate(pc, code);
+            }
+            if self.idle.anchor == Some(pc) && self.idle.at_anchor(self.cpu.cycles, self.cpu.msr & msr::EE != 0) {
+                self.idle_skip();
+                if self.pace_limit.is_some_and(|limit| self.cpu.cycles >= limit) {
+                    return StopReason::Budget;
+                }
+            }
             if self.fast_forward.is_candidate(pc) {
                 // The guest is about to spin on the timebase: let the time pass.
                 self.unsynced += self.fast_forward.try_skip(&mut self.cpu);
@@ -111,6 +146,16 @@ impl Machine {
                 let idx = (pc.wrapping_sub(PROFILE_BASE) / 4) as usize;
                 if idx < PROFILE_WORDS {
                     prof[idx] += 1;
+                }
+                self.sample_countdown -= 1;
+                if self.sample_countdown == 0 {
+                    self.sample_countdown = SAMPLE_PERIOD;
+                    if let Some(samples) = &mut self.pc_samples {
+                        *samples.entry(pc).or_insert(0) += 1;
+                    }
+                    if let Some((_, window)) = &mut self.pc_window {
+                        *window.entry(pc).or_insert(0) += 1;
+                    }
                 }
             }
             if let Some(w) = &mut self.board.watch {
@@ -148,6 +193,26 @@ impl Machine {
     }
 
     /// Bring devices up to date with the CPU's virtual clock.
+    /// The scheduler is idle: let virtual time pass up to the next timer
+    /// interrupt (one timebase tick short), never past it.
+    fn idle_skip(&mut self) {
+        self.sync_devices();
+        if self.board.external_interrupt() {
+            return; // something is already pending: let it be taken
+        }
+        let div = self.cpu.tb_divider as u64;
+        let until_dec = if self.cpu.tb_enabled { self.cpu.ticks_until_decrementer().map(|t| t * div) } else { None };
+        let until_pit = self.board.mpc.cycles_until_pit_interrupt();
+        let Some(skip) = self.idle.skip_cycles(until_dec, until_pit, div) else { return };
+        if self.cpu.tb_enabled {
+            self.cpu.skip_timebase(skip / div);
+        } else {
+            self.cpu.cycles += skip;
+        }
+        self.unsynced += skip;
+        self.sync_devices();
+    }
+
     pub fn sync_devices(&mut self) {
         self.board.advance(self.unsynced);
         self.unsynced = 0;
@@ -166,6 +231,31 @@ impl Machine {
 
     pub fn enable_profile(&mut self) {
         self.profile = Some(vec![0; PROFILE_WORDS]);
+        self.pc_samples = Some(HashMap::new());
+    }
+
+    /// All PC samples as text lines `address whole_run window`, for
+    /// `--profile-dump` (offline analysis, e.g. against IDA functions).
+    pub fn profile_dump(&self) -> String {
+        let Some(samples) = &self.pc_samples else { return String::new() };
+        let window = self.pc_window.as_ref().map(|(_, w)| w);
+        let mut addrs: Vec<u32> = samples.keys().copied().collect();
+        addrs.sort_unstable();
+        let mut out = String::from("# address samples_whole_run samples_window\n");
+        for a in addrs {
+            let w = window.and_then(|w| w.get(&a)).copied().unwrap_or(0);
+            out += &format!("{a:#010x} {} {w}\n", samples[&a]);
+        }
+        out
+    }
+
+    /// Start a profile window (console `Ctrl-] p`), e.g. once IOS is idle at
+    /// its prompt. The whole-run histogram keeps counting.
+    pub fn reset_profile(&mut self) {
+        if self.profile.is_some() {
+            self.pc_window = Some((self.cpu.cycles, HashMap::new()));
+            log::info!("profile window started at {} instructions", self.cpu.cycles);
+        }
     }
 
     /// Hottest ROM addresses and 256-byte regions, for `--profile`.
@@ -182,6 +272,13 @@ impl Machine {
         let mut out = format!("execution profile: {total} instructions in ROM\r\n");
         for (addr, n) in regions.iter().take(25) {
             out += &format!("  {addr:#010x}..+0x100  {n:12}  {:5.1}%\r\n", *n as f64 * 100.0 / total.max(1) as f64);
+        }
+        if let Some(samples) = &self.pc_samples {
+            out += &sample_report(&format!("whole run ({} instructions)", self.cpu.cycles), samples);
+        }
+        if let Some((start, window)) = &self.pc_window {
+            let title = format!("window since Ctrl-] p ({} instructions)", self.cpu.cycles - start);
+            out += &sample_report(&title, window);
         }
         out
     }
@@ -208,6 +305,9 @@ impl Machine {
                 "MMU: {} ITLB misses, {} DTLB misses, {} TLB errors; valid entries now {i} ITLB / {d} DTLB\r\n",
                 mmu.itlb_misses, mmu.dtlb_misses, mmu.tlb_errors
             );
+        }
+        if self.idle.anchor.is_some() {
+            out += &self.idle.report();
         }
         for &pc in &self.cpu.soft_emulation_pcs.clone() {
             let w = self.peek_word(pc).unwrap_or(0);
@@ -331,4 +431,29 @@ impl Machine {
         }
         false
     }
+}
+
+/// Hottest sampled PCs, and the same samples grouped in 4 KB pages (enough
+/// to tell phases such as decompression, initialisation and idle apart).
+fn sample_report(title: &str, samples: &HashMap<u32, u64>) -> String {
+    let total: u64 = samples.values().sum::<u64>().max(1);
+    let pct = |n: u64| n as f64 * 100.0 / total as f64;
+    let mut hot: Vec<(u32, u64)> = samples.iter().map(|(&a, &n)| (a, n)).collect();
+    hot.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut pages: HashMap<u32, u64> = HashMap::new();
+    for (&a, &n) in samples {
+        *pages.entry(a & !0xFFF).or_insert(0) += n;
+    }
+    let mut pages: Vec<(u32, u64)> = pages.into_iter().collect();
+    pages.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = format!("sampled PCs, {title}: {total} samples (1 per {SAMPLE_PERIOD} instructions)\r\n");
+    out += "  hottest 4 KB pages:\r\n";
+    for (page, n) in pages.iter().take(15) {
+        out += &format!("    {page:#010x}  {n:10}  {:5.1}%\r\n", pct(*n));
+    }
+    out += "  hottest addresses:\r\n";
+    for (addr, n) in hot.iter().take(30) {
+        out += &format!("    {addr:#010x}  {n:10}  {:5.1}%\r\n", pct(*n));
+    }
+    out
 }
