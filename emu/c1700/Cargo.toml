@@ -1,0 +1,22 @@
+[package]
+name = "c1700emu"
+version = "0.1.0"
+edition = "2024"
+description = "Emulator for the Cisco C1700 (MPC860T) System Bootstrap ROM"
+
+[[bin]]
+name = "c1700emu"
+path = "src/main.rs"
+
+[dependencies]
+ppc8xx = { path = "../ppc8xx" }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+env_logger = "0.11"
+gdbstub = "0.7"
+gdbstub_arch = "0.3"
+log = "0.4"
+powerpc = "0.4"
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-udp", "socket-icmp"] }
+crc32fast = "1.5.2"
+tftp-packet = "0.1"

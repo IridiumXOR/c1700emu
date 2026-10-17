@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["ppc8xx", "c1700"]
+
+[profile.release]
+debug = 1          # keep symbols so `perf` / backtraces stay readable
+
+[profile.dev]
+opt-level = 1      # the interpreter is painfully slow at -O0

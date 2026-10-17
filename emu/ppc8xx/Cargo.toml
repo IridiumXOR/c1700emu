@@ -1,0 +1,14 @@
+[package]
+name = "ppc8xx"
+version = "0.1.0"
+edition = "2024"
+description = "Interpreter for the PowerPC core of the Motorola MPC8xx (MPC860) family"
+
+[dependencies]
+log = "0.4"
+powerpc = "0.4"
+
+[dev-dependencies]
+fastrand = "2.5.0"
+object = "0.40.0"
+powerpc-asm = "0.4"
