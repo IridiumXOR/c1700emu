@@ -20,8 +20,10 @@
 
 mod decode_cache;
 mod execute;
+pub mod mmu;
 
 use decode_cache::DecodeCache;
+use mmu::{Access, Fault, Mmu};
 
 /// The bus answered "nobody is here" (no chip select matched, or a device
 /// refused the access). On the MPC860 this is a TEA (transfer error
@@ -151,6 +153,13 @@ pub enum Exception {
     Trace,
     /// Unimplemented instruction (including every floating-point opcode).
     SoftwareEmulation,
+    /// No ITLB/DTLB entry for the address: software reloads the TLB (MPC860UM §6.1.3.2-3).
+    ItlbMiss,
+    DtlbMiss,
+    /// A TLB entry matched but forbids the access (page faults, §6.1.3.4-5).
+    /// `status` = SRR1 bits 1-4; `dsisr` = DSISR bits 1, 4, 6.
+    ItlbError { status: u32 },
+    DtlbError { addr: u32, dsisr: u32 },
 }
 
 /// Why a Program exception was raised; encoded into SRR1 bits 11-14.
@@ -175,6 +184,10 @@ impl Exception {
             Exception::SystemCall => 0xC00,
             Exception::Trace => 0xD00,
             Exception::SoftwareEmulation => 0x1000,
+            Exception::ItlbMiss => 0x1100,
+            Exception::DtlbMiss => 0x1200,
+            Exception::ItlbError { .. } => 0x1300,
+            Exception::DtlbError { .. } => 0x1400,
         }
     }
 }
@@ -222,7 +235,7 @@ pub struct Cpu {
     /// Data cache control/status: bit 0 = DEN (cache enabled).
     pub dc_cst: u32,
     /// Storage for SPRs we accept but do not model (debug comparators,
-    /// MMU registers, ICTRL, M_TW...). Indexed by SPR number.
+    /// ICTRL...). Indexed by SPR number.
     pub spr_misc: Box<[u32; 1024]>,
     /// Reservation address set by `lwarx`, consumed by `stwcx.`.
     pub reservation: Option<u32>,
@@ -237,8 +250,8 @@ pub struct Cpu {
     tb_prescaler: u32,
     /// Decrementer went from 0 to 0xFFFF_FFFF and the exception wasn't taken yet.
     pub dec_pending: bool,
-    /// Warn only once when software enables the (unimplemented) MMU.
-    mmu_warned: bool,
+    /// Instruction and data MMUs (TLBs, table-walk assist, protection).
+    pub mmu: Mmu,
     /// Memo of recently decoded instruction words (see `decode_cache`).
     decoder: DecodeCache,
     /// How many times each exception vector was taken (index = vector / 0x100).
@@ -280,7 +293,7 @@ impl Cpu {
             tb_enabled: false,
             tb_prescaler: 0,
             dec_pending: false,
-            mmu_warned: false,
+            mmu: Mmu::new(),
             decoder: DecodeCache::new(),
             exception_counts: [0; 32],
             soft_emulation_pcs: Vec::new(),
@@ -322,9 +335,19 @@ impl Cpu {
             }
         }
 
-        // 2. Fetch. A fetch that nobody answers is a machine check.
+        // 2. Translate (MSR[IR]) and fetch. A fetch that nobody answers is a
+        //    machine check.
         let pc = self.pc;
-        let word = match sys.fetch(pc) {
+        let pa = if self.msr & msr::IR != 0 {
+            match self.mmu.translate(pc, Access::Fetch, self.msr & msr::PR != 0) {
+                Ok(pa) => pa,
+                Err(Fault::Miss) => return self.enter_exception(Exception::ItlbMiss, pc),
+                Err(Fault::Error(status)) => return self.enter_exception(Exception::ItlbError { status }, pc),
+            }
+        } else {
+            pc
+        };
+        let word = match sys.fetch(pa) {
             Ok(w) => w,
             Err(BusError) => {
                 return self.enter_exception(Exception::MachineCheck { addr: None }, pc);
@@ -423,6 +446,13 @@ impl Cpu {
                 self.dar = addr;
                 self.dsisr = dsisr;
             }
+            Exception::DtlbError { addr, dsisr } => {
+                self.dar = addr;
+                self.dsisr = dsisr;
+            }
+            // SRR1 bits 4 and 10 are set on an ITLB miss (Table 6-13).
+            Exception::ItlbMiss => srr1_status = 0x0800_0000 | 0x0020_0000,
+            Exception::ItlbError { status } => srr1_status = status,
             Exception::Program(ProgramReason::Privileged) => srr1_status = 0x0004_0000,
             Exception::Program(ProgramReason::Trap) => srr1_status = 0x0002_0000,
             _ => {}
@@ -450,16 +480,25 @@ impl Cpu {
         self.pc = self.srr0 & !3;
     }
 
-    /// Write the MSR, warning about features we do not emulate.
+    /// Write the MSR.
     pub fn set_msr(&mut self, value: u32) {
-        if value & (msr::IR | msr::DR) != 0 && !self.mmu_warned {
-            self.mmu_warned = true;
-            log::warn!(
-                "software enabled the MMU (MSR={value:#010x}) at pc={:#010x}: translation is NOT emulated, using identity mapping",
-                self.pc
-            );
+        if (value ^ self.msr) & (msr::IR | msr::DR) != 0 {
+            log::debug!(target: "mmu", "translation {} (MSR={value:#010x}) at pc={:#010x}",
+                if value & (msr::IR | msr::DR) != 0 { "on" } else { "off" }, self.pc);
         }
         self.msr = value;
+    }
+
+    /// Physical address for a data access at `ea` (identity when `MSR[DR]=0`).
+    #[inline]
+    pub(crate) fn data_address(&mut self, ea: u32, access: Access) -> Result<u32, Exception> {
+        if self.msr & msr::DR == 0 {
+            return Ok(ea);
+        }
+        self.mmu.translate(ea, access, self.msr & msr::PR != 0).map_err(|fault| match fault {
+            Fault::Miss => Exception::DtlbMiss,
+            Fault::Error(dsisr) => Exception::DtlbError { addr: ea, dsisr },
+        })
     }
 
     /// `mfspr` (and `mftb`) semantics. `Err` means the access must raise an
@@ -470,6 +509,9 @@ impl Cpu {
             return Err(Exception::Program(ProgramReason::Privileged));
         }
         if let Some(v) = sys.read_spr(n) {
+            return Ok(v);
+        }
+        if let Some(v) = self.mmu.read_spr(n) {
             return Ok(v);
         }
         Ok(match n {
@@ -499,6 +541,10 @@ impl Cpu {
         if sys.write_spr(n, v) {
             return Ok(());
         }
+        if self.mmu.write_spr(n, v) {
+            log::trace!(target: "mmu", "mtspr {n} = {v:#010x} at pc={:#010x}", self.pc);
+            return Ok(());
+        }
         match n {
             spr::XER => self.xer = v & 0xE000_007F,
             spr::LR => self.lr = v,
@@ -518,14 +564,7 @@ impl Cpu {
             spr::PVR => {} // read-only
             spr::IC_CST => self.ic_cst = cache_command(self.ic_cst, v),
             spr::DC_CST => self.dc_cst = cache_command(self.dc_cst, v),
-            _ => {
-                if (784..=799).contains(&n) {
-                    // 8xx MMU registers: translation isn't emulated, so log what
-                    // software programs (TLB entries, table walk base...).
-                    log::debug!(target: "mmu", "mtspr {n} = {v:#010x} at pc={:#010x}", self.pc);
-                }
-                self.spr_misc[n as usize & 0x3FF] = v
-            }
+            _ => self.spr_misc[n as usize & 0x3FF] = v,
         }
         Ok(())
     }

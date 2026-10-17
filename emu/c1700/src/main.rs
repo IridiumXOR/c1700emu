@@ -43,6 +43,11 @@ struct Args {
     #[arg(long, default_value = "1720")]
     model: String,
 
+    /// Processor board serial (`show version`: "Processor board ID"), Cisco
+    /// format LLLYYWWSSSS, e.g. FTX0945W0MY. Default for a new NVRAM: EMU1234C170.
+    #[arg(long)]
+    serial: Option<String>,
+
     /// Internal flash size in MB: 4 (2 x AMD Am29F016), 8, 16 or 32 (Intel
     /// StrataFlash x16). Default: 32 for 1751/1760, 16 otherwise.
     #[arg(long)]
@@ -91,6 +96,16 @@ struct Args {
     /// Also serve the console over telnet on this TCP port.
     #[arg(long)]
     tcp: Option<u16>,
+
+    /// Log every access to a physical address range, START:LEN in hex
+    /// (e.g. 07040000:4000), with the PC of the instruction (or DMA).
+    #[arg(long, value_parser = parse_watch)]
+    watch: Option<(u32, u32)>,
+
+    /// Serve the AUX port (DUART channel B) over telnet on this TCP port
+    /// (without it, AUX output goes to the log).
+    #[arg(long)]
+    aux_tcp: Option<u16>,
 
     /// Don't attach the console to this terminal (use with --tcp).
     #[arg(long)]
@@ -219,6 +234,9 @@ fn main() -> Result<(), String> {
         log::info!("NVRAM had no valid cookie: wrote a default one (MAC 02:17:00:00:00:01)");
     }
     cookie::set_pm_id(nvram.bytes_mut(), pm_id);
+    if let Some(serial) = &args.serial {
+        cookie::set_serial(nvram.bytes_mut(), serial)?;
+    }
     if let Some(cr) = args.confreg {
         write_confreg(&mut nvram, cr);
     }
@@ -261,8 +279,12 @@ fn main() -> Result<(), String> {
         if listing.is_empty() { "empty".to_string() } else { listing.join(", ") }
     );
 
+    if let Some((start, len)) = args.watch {
+        machine.board.watch = Some(c1700emu::board::Watch { start, end: start.wrapping_add(len), pc: u32::MAX });
+    }
     let console = Console::new(!args.no_stdio, args.tcp).map_err(|e| format!("console: {e}"))?;
-    let mut emu = Emulator::new(machine, console);
+    let aux = args.aux_tcp.map(Console::aux).transpose().map_err(|e| format!("AUX port: {e}"))?;
+    let mut emu = Emulator::new(machine, console, aux);
 
     if let Some(port) = args.gdb {
         emu = gdb::serve(emu, port)?;
@@ -280,4 +302,10 @@ fn main() -> Result<(), String> {
     eprint!("{report}"); // restores the terminal and saves NVRAM
     eprintln!();
     Ok(())
+}
+
+fn parse_watch(s: &str) -> Result<(u32, u32), String> {
+    let (a, l) = s.split_once(':').ok_or("expected START:LEN (hex)")?;
+    let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).map_err(|e| e.to_string());
+    Ok((hex(a)?, hex(l)?))
 }

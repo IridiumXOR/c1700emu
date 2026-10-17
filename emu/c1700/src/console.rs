@@ -9,6 +9,9 @@
 //!   serial BREAK.
 //!
 //! Input from all sources arrives through one channel as [`ConsoleEvent`]s.
+//!
+//! The AUX port (DUART channel B) can get its own TCP-only console
+//! (`--aux-tcp PORT`, [`Console::aux`]).
 
 use crossterm::terminal;
 use std::io::{IsTerminal, Read, Write};
@@ -35,6 +38,15 @@ pub struct Console {
 
 impl Console {
     pub fn new(use_stdio: bool, tcp_port: Option<u16>) -> std::io::Result<Self> {
+        Self::build(use_stdio, tcp_port, "console also")
+    }
+
+    /// A TCP-only console for the AUX port.
+    pub fn aux(tcp_port: u16) -> std::io::Result<Self> {
+        Self::build(false, Some(tcp_port), "AUX port")
+    }
+
+    fn build(use_stdio: bool, tcp_port: Option<u16>, what: &str) -> std::io::Result<Self> {
         let (tx, rx) = channel();
         let clients = Arc::new(Mutex::new(Vec::new()));
         let mut raw_mode = false;
@@ -50,7 +62,7 @@ impl Console {
         }
         if let Some(port) = tcp_port {
             let listener = TcpListener::bind(("127.0.0.1", port))?;
-            eprint!("[c1700emu] console also on telnet://127.0.0.1:{port}\r\n");
+            eprint!("[c1700emu] {what} on telnet://127.0.0.1:{port}\r\n");
             let clients = clients.clone();
             thread::spawn(move || tcp_acceptor(listener, tx, clients));
         }

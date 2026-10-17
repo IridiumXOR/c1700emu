@@ -123,7 +123,15 @@ impl Board {
             let Some(net) = &self.net else { return Ok(()) };
             let Some(next) = net.peek_for_guest() else { return Ok(()) };
             if next.len() < 14 || !self.fec_accepts(&next[0..6]) {
-                self.net.as_mut().unwrap().pop_for_guest(); // filtered out
+                log::debug!(
+                    target: "fec",
+                    "receive: dropped by the address filter (dst {:02x?}, ADDR_LOW {:#010x} ADDR_HIGH {:#010x} R_CNTRL {:#x})",
+                    &next[0..6.min(next.len())],
+                    self.fec_reg(off::ADDR_LOW),
+                    self.fec_reg(off::ADDR_HIGH),
+                    self.fec_reg(off::R_CNTRL)
+                );
+                self.net.as_mut().unwrap().pop_for_guest();
                 continue;
             }
             // Is the next receive buffer free? If not, keep the frame queued
@@ -184,6 +192,14 @@ impl Board {
             self.mpc.fec.rx_cursor = Some(Self::next_bd(bd, status, ring));
             if last {
                 self.mpc.fec.ievent |= fec::IEVENT_RFINT;
+                log::debug!(
+                    target: "fec",
+                    "receive: {} bytes into RxBD {bd:#x} (buffer {buf:#x}); IEVENT {:#010x} IMASK {:#010x} IVEC {:#010x}",
+                    frame.len(),
+                    self.mpc.fec.ievent,
+                    self.mpc.fec.imask,
+                    self.mpc.fec.ivec
+                );
                 return Ok(());
             }
         }

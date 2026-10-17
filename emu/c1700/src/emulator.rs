@@ -12,26 +12,33 @@ pub const SLICE: u64 = 100_000;
 pub struct Emulator {
     pub machine: Machine,
     pub console: Console,
+    /// Optional telnet console of the AUX port (DUART channel B).
+    pub aux: Option<Console>,
     /// Typed characters waiting for room in the UART receive FIFO.
     pending_input: VecDeque<u8>,
+    pending_aux_input: VecDeque<u8>,
     pub quit: bool,
     last_flush: Instant,
 }
 
 impl Emulator {
-    pub fn new(machine: Machine, console: Console) -> Self {
-        Emulator { machine, console, pending_input: VecDeque::new(), quit: false, last_flush: Instant::now() }
+    pub fn new(machine: Machine, console: Console, aux: Option<Console>) -> Self {
+        Emulator {
+            machine,
+            console,
+            aux,
+            pending_input: VecDeque::new(),
+            pending_aux_input: VecDeque::new(),
+            quit: false,
+            last_flush: Instant::now(),
+        }
     }
 
     /// Move output to the console and input to the UART; persist NVRAM now and then.
     pub fn pump_console(&mut self) {
         let out = self.machine.take_console_output();
         self.console.write(&out);
-        // AUX port (DUART channel B): not wired to a terminal yet, show it in the log.
-        let aux = std::mem::take(&mut self.machine.board.io.aux.tx);
-        if !aux.is_empty() {
-            log::info!(target: "aux", "{}", String::from_utf8_lossy(&aux).trim_end());
-        }
+        self.pump_aux();
 
         while let Some(ev) = self.console.poll() {
             match ev {
@@ -55,6 +62,31 @@ impl Emulator {
             if let Err(e) = self.machine.board.flash.flush() {
                 log::error!("flash save failed: {e}");
             }
+        }
+    }
+
+    /// The AUX port: to its telnet console if there is one, else to the log.
+    fn pump_aux(&mut self) {
+        let out = self.machine.take_aux_output();
+        let Some(aux) = &self.aux else {
+            if !out.is_empty() {
+                log::info!(target: "aux", "{}", String::from_utf8_lossy(&out).trim_end());
+            }
+            return;
+        };
+        aux.write(&out);
+        while let Some(ev) = aux.poll() {
+            match ev {
+                ConsoleEvent::Input(b) => self.pending_aux_input.push_back(b),
+                ConsoleEvent::Break => self.machine.aux_break(),
+                ConsoleEvent::Quit => {} // only the main console can quit
+            }
+        }
+        while let Some(&b) = self.pending_aux_input.front() {
+            if !self.machine.aux_input(b) {
+                break;
+            }
+            self.pending_aux_input.pop_front();
         }
     }
 

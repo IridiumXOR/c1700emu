@@ -88,8 +88,13 @@ pub struct Mpc860 {
     cpm_command: Option<(u8, u8)>,
 }
 
-/// CIPR bit of the SPI controller (MPC860UM Table 35-?: CPM interrupt sources).
+/// CIPR bits of the CPM interrupt sources we model (MPC860UM Table 35-?:
+/// bit n = 0x8000_0000 >> n; SPI is bit 26, IDMA1/IDMA2 bits 10/11).
 const CIPR_SPI: u32 = 0x0000_0020;
+const CIPR_IDMA: [u32; 2] = [0x0020_0000, 0x0010_0000];
+/// IDMA status registers (write-1-to-clear) and masks.
+const IDSR: [u32; 2] = [0x910, 0x918];
+const IDMR: [u32; 2] = [0x914, 0x91C];
 /// CICR: IEN (CPM interrupts enabled) and the IRL field (SIU level used).
 const CICR_IEN: u32 = 0x0000_0080;
 
@@ -256,7 +261,13 @@ impl Mpc860 {
     /// CPM interrupt pending register, computed from the sources we model.
     fn cipr(&self) -> u32 {
         let spi_events = self.mem[SPIE as usize] & self.mem[SPIM as usize];
-        if spi_events != 0 { CIPR_SPI } else { 0 }
+        let mut cipr = if spi_events != 0 { CIPR_SPI } else { 0 };
+        for ch in 0..2 {
+            if self.load8(IDSR[ch]) & self.load8(IDMR[ch]) != 0 {
+                cipr |= CIPR_IDMA[ch];
+            }
+        }
+        cipr
     }
 
     /// CIVR: 5-bit code of the highest-priority unmasked CPM source in bits
@@ -474,6 +485,11 @@ impl Mpc860 {
                 self.mem[SPIE as usize] &= !(value as u8);
                 true
             }
+            // IDMA status registers: write-1-to-clear (8-bit).
+            (x, 1) if x == IDSR[0] || x == IDSR[1] => {
+                self.mem[x as usize] &= !(value as u8);
+                true
+            }
             (SPIE, 2) => {
                 self.mem[SPIE as usize] &= !((value >> 8) as u8);
                 true
@@ -567,6 +583,14 @@ impl Mpc860 {
     // Raw big-endian access to the register file
     // ------------------------------------------------------------------
 
+    pub fn load8(&self, off: u32) -> u8 {
+        self.mem.get(off as usize).copied().unwrap_or(0)
+    }
+    pub fn store8(&mut self, off: u32, v: u8) {
+        if let Some(b) = self.mem.get_mut(off as usize) {
+            *b = v;
+        }
+    }
     pub fn load16(&self, off: u32) -> u16 {
         let o = off as usize;
         match self.mem.get(o..o + 2) {

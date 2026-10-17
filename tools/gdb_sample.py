@@ -5,6 +5,7 @@ code around the PC with gdb, then quit the emulator (so --stats print).
     python3 tools/gdb_sample.py OUT MARKER DELAY PORT c1700emu-command...
 
 OUT gets the console, OUT.gdb the gdb dump, OUT.stderr the emulator stderr.
+GDB_EXTRA (environment): more gdb commands, separated by ";".
 """
 import subprocess, sys, time, os, signal
 out, marker, delay, port = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
@@ -17,6 +18,8 @@ gdbcmds = ["set pagination off", "set endian big", "set architecture powerpc:com
            f"target remote :{port}", "continue",
            "info registers", "x/24i $pc-48", "x/16xw $r1", "p/x $lr", "x/8i $lr-16", "stepi 2000", "p/x $pc",
            "detach"]
+# extra commands before "detach", e.g. GDB_EXTRA="x/32i 0x1100;p/x $msr"
+gdbcmds[-1:-1] = [c for c in os.environ.get("GDB_EXTRA", "").split(";") if c.strip()]
 gdb = subprocess.Popen(["gdb", "-nx", "-batch"] + sum((["-ex", c] for c in gdbcmds), []),
                        stdout=open(out + ".gdb", "w"), stderr=subprocess.STDOUT)
 buf = b""; t0 = time.time(); seen = None

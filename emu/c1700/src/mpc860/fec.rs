@@ -116,6 +116,9 @@ impl Fec {
 
     /// Handle a 32-bit write; returns the value the register file should hold.
     pub fn write(&mut self, off: u32, value: u32) -> u32 {
+        if off != off::MII_DATA {
+            log::debug!(target: "fec", "write {} = {value:#010x}", crate::mpc860::names::immr_name(super::regs::FEC_BASE + off));
+        }
         match off {
             off::ECNTRL => {
                 if value & ECNTRL_RESET != 0 {

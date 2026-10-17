@@ -217,3 +217,60 @@ pub fn describe(frame: &[u8]) -> String {
         other => format!("ethertype {other}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Internet checksum (RFC 1071) for building test packets.
+    fn csum(data: &[u8]) -> u16 {
+        let mut sum: u32 = data.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]) as u32).sum();
+        while sum > 0xFFFF {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// A ping from the router (10.0.2.15) to the virtual host gets an echo
+    /// reply. smoltcp only answers pings with its `auto-icmp-echo-reply`
+    /// feature, which our minimal feature list had left out.
+    #[test]
+    fn virtual_host_answers_ping() {
+        let cfg = NetConfig {
+            server_ip: "10.0.2.2".parse().unwrap(),
+            gateway_ip: "10.0.2.1".parse().unwrap(),
+            prefix_len: 24,
+            tftp_root: None,
+        };
+        let mut net = VirtualNetwork::new(cfg);
+        let guest_mac = [0x02, 0x17, 0, 0, 0, 1];
+        let mut icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0, 1];
+        icmp.extend((0..72).map(|i| i as u8));
+        let c = csum(&icmp);
+        icmp[2..4].copy_from_slice(&c.to_be_bytes());
+        let mut ip = vec![0x45, 0, 0, 0, 0, 1, 0, 0, 255, 1, 0, 0, 10, 0, 2, 15, 10, 0, 2, 2];
+        let total = (20 + icmp.len()) as u16;
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        let c = csum(&ip);
+        ip[10..12].copy_from_slice(&c.to_be_bytes());
+        let mut frame = HOST_MAC.to_vec();
+        frame.extend(guest_mac);
+        frame.extend([0x08, 0x00]);
+        frame.extend(ip);
+        frame.extend(icmp);
+
+        // ARP first, so smoltcp knows where to send the reply (as with IOS)
+        let mut arp = vec![0xFF; 6];
+        arp.extend(guest_mac);
+        arp.extend([0x08, 0x06, 0, 1, 8, 0, 6, 4, 0, 1]);
+        arp.extend(guest_mac);
+        arp.extend([10, 0, 2, 15, 0, 0, 0, 0, 0, 0, 10, 0, 2, 2]);
+        net.guest_transmit(arp);
+        net.poll(1_000);
+        while net.pop_for_guest().is_some() {}
+        net.guest_transmit(frame);
+        net.poll(2_000);
+        let replies: Vec<String> = std::iter::from_fn(|| net.pop_for_guest()).map(|f| describe(&f)).collect();
+        assert!(replies.iter().any(|d| d.contains("10.0.2.2 -> 10.0.2.15 ICMP")), "{replies:?}");
+    }
+}

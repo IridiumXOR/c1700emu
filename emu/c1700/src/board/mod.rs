@@ -21,6 +21,7 @@ pub mod cpld;
 mod cpm_spi;
 mod fec_dma;
 mod fpga_config;
+mod idma;
 pub mod flash;
 pub mod flashfs;
 pub mod iobus;
@@ -93,6 +94,19 @@ pub struct Board {
     /// Virtual time in CPU cycles (drives the network's timers).
     now_cycles: u64,
     last_net_poll: u64,
+    /// `--watch`: log every access to this physical range (debugging aid).
+    pub watch: Option<Watch>,
+    /// An IDMA transfer is in progress (its writes may re-enter `run_cpm`).
+    idma_busy: bool,
+}
+
+/// A physical address range whose accesses are logged, like a watchpoint.
+#[derive(Clone, Copy, Debug)]
+pub struct Watch {
+    pub start: u32,
+    pub end: u32,
+    /// PC of the instruction being executed, `u32::MAX` outside the CPU (DMA).
+    pub pc: u32,
 }
 
 /// CPU cycles per microsecond of virtual time (48 MHz core).
@@ -101,6 +115,15 @@ pub const CYCLES_PER_US: u64 = 48;
 const NET_POLL_INTERVAL: u64 = 4096;
 
 impl Board {
+    fn watch_access(&self, addr: u32, size: u32, value: u32, write: bool) {
+        let Some(w) = self.watch else { return };
+        if addr < w.end && addr + size > w.start {
+            let who = if w.pc == u32::MAX { "DMA".to_string() } else { format!("pc={:#010x}", w.pc) };
+            log::info!(target: "watch", "{} {addr:#010x} = {value:#0width$x} ({size} bytes) {who}",
+                if write { "write" } else { "read " }, width = 2 + 2 * size as usize);
+        }
+    }
+
     pub fn new(rom: Vec<u8>, cfg: &BoardConfig, nvram: nvram::Nvram) -> Self {
         let flash = flash::for_size_mb(cfg.flash_mb).unwrap_or_else(|e| panic!("{e}"));
         assert!(rom.len().is_power_of_two(), "ROM size must be a power of two");
@@ -119,6 +142,8 @@ impl Board {
             net: cfg.net.clone().map(VirtualNetwork::new),
             now_cycles: 0,
             last_net_poll: 0,
+            watch: None,
+            idma_busy: false,
         }
     }
 
@@ -154,7 +179,7 @@ impl Board {
     }
 
     /// Let the CPM (communication processor) act on commands software just
-    /// gave it: CPCR commands and SPI transfers.
+    /// gave it: CPCR commands, SPI transfers, IDMA requests.
     fn run_cpm(&mut self) {
         if let Some((op, ch)) = self.mpc.take_cpm_command() {
             self.cpm_command(op, ch);
@@ -162,6 +187,7 @@ impl Board {
         if self.mpc.take_spi_start() {
             self.spi_transfer();
         }
+        self.idma_service();
     }
 
     /// The UART interrupt output is wired to IRQ1 (the ROM unmasks only IRQ1
@@ -310,7 +336,7 @@ fn put32(mem: &mut [u8], off: u32, v: u32) {
 impl Platform for Board {
     fn read8(&mut self, addr: u32) -> Result<u8, BusError> {
         let low = addr & PAGE_MASK;
-        Ok(match self.region(addr) {
+        let v = match self.region(addr) {
             Region::Dram { bank, base } => self.dram[bank as usize][(base + low) as usize],
             Region::Rom { base } => self.rom[(base + low) as usize],
             Region::Immr => self.mpc.read8(addr - self.mpc.isb()),
@@ -322,12 +348,16 @@ impl Platform for Board {
             }
             Region::EmptyBank => 0xFF,
             Region::Unmapped | Region::Stale => return Err(self.bus_error(addr, "read8")),
-        })
+        };
+        if self.watch.is_some() {
+            self.watch_access(addr, 1, v as u32, false);
+        }
+        Ok(v)
     }
 
     fn read16(&mut self, addr: u32) -> Result<u16, BusError> {
         let low = addr & PAGE_MASK;
-        Ok(match self.region(addr) {
+        let v = match self.region(addr) {
             Region::Dram { bank, base } => be16(&self.dram[bank as usize], base + low),
             Region::Rom { base } => be16(&self.rom, base + low),
             Region::Immr => self.mpc.read16(addr - self.mpc.isb()),
@@ -336,12 +366,16 @@ impl Platform for Board {
             Region::IoBus { .. } => u16::from_be_bytes([self.read8(addr)?, self.read8(addr + 1)?]),
             Region::EmptyBank => 0xFFFF,
             Region::Unmapped | Region::Stale => return Err(self.bus_error(addr, "read16")),
-        })
+        };
+        if self.watch.is_some() {
+            self.watch_access(addr, 2, v as u32, false);
+        }
+        Ok(v)
     }
 
     fn read32(&mut self, addr: u32) -> Result<u32, BusError> {
         let low = addr & PAGE_MASK;
-        Ok(match self.region(addr) {
+        let v = match self.region(addr) {
             Region::Dram { bank, base } => be32(&self.dram[bank as usize], base + low),
             Region::Rom { base } => be32(&self.rom, base + low),
             Region::Immr => self.mpc.read32(addr - self.mpc.isb()),
@@ -358,10 +392,17 @@ impl Platform for Board {
             ]),
             Region::EmptyBank => 0xFFFF_FFFF,
             Region::Unmapped | Region::Stale => return Err(self.bus_error(addr, "read32")),
-        })
+        };
+        if self.watch.is_some() {
+            self.watch_access(addr, 4, v as u32, false);
+        }
+        Ok(v)
     }
 
     fn write8(&mut self, addr: u32, value: u8) -> Result<(), BusError> {
+        if self.watch.is_some() {
+            self.watch_access(addr, 1, value as u32, true);
+        }
         let low = addr & PAGE_MASK;
         match self.region(addr) {
             Region::Dram { bank, base } => self.dram[bank as usize][(base + low) as usize] = value,
@@ -382,6 +423,9 @@ impl Platform for Board {
     }
 
     fn write16(&mut self, addr: u32, value: u16) -> Result<(), BusError> {
+        if self.watch.is_some() {
+            self.watch_access(addr, 2, value as u32, true);
+        }
         let low = addr & PAGE_MASK;
         match self.region(addr) {
             Region::Dram { bank, base } => put16(&mut self.dram[bank as usize], base + low, value),
@@ -403,6 +447,9 @@ impl Platform for Board {
     }
 
     fn write32(&mut self, addr: u32, value: u32) -> Result<(), BusError> {
+        if self.watch.is_some() {
+            self.watch_access(addr, 4, value as u32, true);
+        }
         let low = addr & PAGE_MASK;
         match self.region(addr) {
             Region::Dram { bank, base } => put32(&mut self.dram[bank as usize], base + low, value),

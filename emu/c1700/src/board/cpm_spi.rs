@@ -60,6 +60,18 @@ impl Board {
     /// (RBPTR = RBASE, TBPTR = TBASE; same offsets for SCC, SMC and SPI).
     pub(super) fn cpm_command(&mut self, opcode: u8, ch: u8) {
         log::debug!(target: "cpm", "CPCR opcode {opcode} channel {ch}");
+        // IDMA1 shares channel 1 with I2C, IDMA2 channel 5 with SPI; their
+        // commands are INIT IDMA (5) and STOP IDMA (11) (MPC860UM §19.3.5).
+        let idma = match ch {
+            1 => Some(0),
+            CH_SPI => Some(1),
+            _ => None,
+        };
+        match (idma, opcode) {
+            (Some(i), 5) => return self.idma_init(i),
+            (Some(i), 11) => return self.idma_stop(i),
+            _ => {}
+        }
         let Some(base) = channel_param_base(self, ch) else { return };
         let (rbase, tbase) = (self.mpc.load16(base), self.mpc.load16(base + 2));
         match opcode {

@@ -113,7 +113,14 @@ impl Machine {
                     prof[idx] += 1;
                 }
             }
-            if self.cpu.step(&mut self.board) == StepOutcome::Checkstop {
+            if let Some(w) = &mut self.board.watch {
+                w.pc = self.cpu.pc;
+            }
+            let outcome = self.cpu.step(&mut self.board);
+            if let Some(w) = &mut self.board.watch {
+                w.pc = u32::MAX;
+            }
+            if outcome == StepOutcome::Checkstop {
                 if let Some(reason) = self.on_checkstop() {
                     return reason;
                 }
@@ -185,6 +192,7 @@ impl Machine {
             (0x1, "system reset"), (0x2, "machine check"), (0x3, "DSI"), (0x4, "ISI"), (0x5, "external"),
             (0x6, "alignment"), (0x7, "program"), (0x9, "decrementer"), (0xC, "system call"), (0xD, "trace"),
             (0x10, "software emulation"), (0x11, "ITLB miss"), (0x12, "DTLB miss"),
+            (0x13, "ITLB error"), (0x14, "DTLB error"),
         ];
         let mut out = String::from("exceptions taken:\r\n");
         for (i, n) in names {
@@ -192,6 +200,14 @@ impl Machine {
             if c > 0 {
                 out += &format!("  {:#06x} {n:<20} {c}\r\n", i << 8);
             }
+        }
+        let mmu = &self.cpu.mmu;
+        if mmu.itlb_misses + mmu.dtlb_misses + mmu.tlb_errors > 0 {
+            let (i, d) = mmu.occupancy();
+            out += &format!(
+                "MMU: {} ITLB misses, {} DTLB misses, {} TLB errors; valid entries now {i} ITLB / {d} DTLB\r\n",
+                mmu.itlb_misses, mmu.dtlb_misses, mmu.tlb_errors
+            );
         }
         for &pc in &self.cpu.soft_emulation_pcs.clone() {
             let w = self.peek_word(pc).unwrap_or(0);
@@ -219,7 +235,18 @@ impl Machine {
 
     /// Convenience for tests and the debugger: read a word without side effects.
     pub fn peek_word(&mut self, addr: u32) -> Option<u32> {
-        self.board.peek_word(addr)
+        self.board.peek_word(self.debugger_address(addr))
+    }
+
+    /// Physical address a debugger means by `ea`: when the guest runs with
+    /// translation on, look it up in the TLBs (without side effects);
+    /// otherwise, or if no entry maps it, use it as a physical address.
+    pub fn debugger_address(&self, ea: u32) -> u32 {
+        let msr = self.cpu.msr;
+        if msr & (ppc8xx::msr::IR | ppc8xx::msr::DR) == 0 {
+            return ea;
+        }
+        self.cpu.mmu.probe(ea, false).or_else(|| self.cpu.mmu.probe(ea, true)).unwrap_or(ea)
     }
 
     /// Bytes the guest printed on the console since the last call.
@@ -243,6 +270,26 @@ impl Machine {
         self.board.update_irq();
     }
 
+    /// Bytes the guest sent out of the AUX port (DUART channel B).
+    pub fn take_aux_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.board.io.aux.tx)
+    }
+
+    /// Deliver one byte to the AUX port, if its receive FIFO has room.
+    pub fn aux_input(&mut self, byte: u8) -> bool {
+        if !self.board.io.aux.rx_has_room() {
+            return false;
+        }
+        self.board.io.aux.receive(byte);
+        self.board.update_irq();
+        true
+    }
+
+    pub fn aux_break(&mut self) {
+        self.board.io.aux.receive_break();
+        self.board.update_irq();
+    }
+
     /// Is the guest just spinning on "is there a character?"
     pub fn guest_is_idle(&self) -> bool {
         self.board.io.uart.idle_polls > 20_000
@@ -251,7 +298,7 @@ impl Machine {
     /// Read memory for debugging without device side effects.
     pub fn read_mem(&mut self, addr: u32, buf: &mut [u8]) -> usize {
         for (i, b) in buf.iter_mut().enumerate() {
-            match self.board.peek8(addr.wrapping_add(i as u32)) {
+            match self.board.peek8(self.debugger_address(addr.wrapping_add(i as u32))) {
                 Some(v) => *b = v,
                 None => return i,
             }
@@ -260,7 +307,10 @@ impl Machine {
     }
 
     pub fn write_mem(&mut self, addr: u32, data: &[u8]) -> bool {
-        data.iter().enumerate().all(|(i, &b)| self.board.poke8(addr.wrapping_add(i as u32), b))
+        data.iter().enumerate().all(|(i, &b)| {
+            let pa = self.debugger_address(addr.wrapping_add(i as u32));
+            self.board.poke8(pa, b)
+        })
     }
 
     /// Run until the guest prints `needle` or `budget` instructions pass.

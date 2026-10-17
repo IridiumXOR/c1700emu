@@ -19,6 +19,7 @@
 //! * XER holds the sticky Summary Overflow (SO), Overflow (OV) and Carry (CA)
 //!   flags, plus a byte count used by the string instructions.
 
+use crate::mmu::Access as MemAccess;
 use crate::{BusError, Cpu, Exception, Platform, ProgramReason, msr};
 use powerpc::{Ins, Opcode};
 
@@ -505,14 +506,29 @@ impl Cpu {
             // Cache and synchronisation. Without a cache model most of these
             // are no-ops; dcbz is the exception because it writes memory.
             // ================================================================
-            Sync | Isync | Eieio | Icbi | Dcbt | Dcbtst | Dcbst | Dcbf => {}
+            Sync | Isync | Eieio | Dcbt | Dcbtst => {}
+            // No cache model, but these still translate their address: with
+            // the MMU on they can take DTLB misses/errors (MPC860UM §8.9).
+            Icbi | Dcbst | Dcbf => {
+                let ea = self.effective_address(ins, Addr::X);
+                self.data_address(ea, MemAccess::Load)?;
+            }
             Dcbz => {
                 let line = self.effective_address(ins, Addr::X) & !(CACHE_LINE - 1);
                 for offset in (0..CACHE_LINE).step_by(4) {
                     self.store32(sys, line + offset, 0)?;
                 }
             }
-            Dcbi | Tlbie | Tlbsync => self.require_supervisor()?,
+            Dcbi => {
+                self.require_supervisor()?;
+                let ea = self.effective_address(ins, Addr::X);
+                self.data_address(ea, MemAccess::Store)?;
+            }
+            Tlbie => {
+                self.require_supervisor()?;
+                self.mmu.tlbie(self.rb(ins));
+            }
+            Tlbsync => self.require_supervisor()?, // a no-op on the 8xx
 
             // ================================================================
             // System / supervisor
@@ -561,7 +577,10 @@ impl Cpu {
                 }
             }
 
-            Opcode::Illegal if ins.code & TLBIA_MASK == TLBIA_PATTERN => self.require_supervisor()?,
+            Opcode::Illegal if ins.code & TLBIA_MASK == TLBIA_PATTERN => {
+                self.require_supervisor()?;
+                self.mmu.tlbia();
+            }
 
             // ================================================================
             // Everything else: floating point (no FPU on the 860), segment
@@ -825,13 +844,19 @@ impl Cpu {
     // several bus cycles), so we split them into byte accesses. Aligned
     // accesses go to the platform as a single sized access, which matters for
     // memory-mapped registers.
+    //
+    // With MSR[DR]=1 every access is translated first (`data_address`); an
+    // aligned half/word never crosses a page, a misaligned one is split into
+    // bytes that are translated one by one.
 
     fn load8<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u8, Exception> {
-        sys.read8(ea).map_err(|BusError| machine_check(ea))
+        let pa = self.data_address(ea, MemAccess::Load)?;
+        sys.read8(pa).map_err(|BusError| machine_check(ea))
     }
     fn load16<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u16, Exception> {
         if ea & 1 == 0 {
-            return sys.read16(ea).map_err(|BusError| machine_check(ea));
+            let pa = self.data_address(ea, MemAccess::Load)?;
+            return sys.read16(pa).map_err(|BusError| machine_check(ea));
         }
         let hi = self.load8(sys, ea)?;
         let lo = self.load8(sys, ea.wrapping_add(1))?;
@@ -839,7 +864,8 @@ impl Cpu {
     }
     fn load32<P: Platform>(&mut self, sys: &mut P, ea: u32) -> Result<u32, Exception> {
         if ea & 3 == 0 {
-            return sys.read32(ea).map_err(|BusError| machine_check(ea));
+            let pa = self.data_address(ea, MemAccess::Load)?;
+            return sys.read32(pa).map_err(|BusError| machine_check(ea));
         }
         let mut b = [0u8; 4];
         for (i, byte) in b.iter_mut().enumerate() {
@@ -848,11 +874,13 @@ impl Cpu {
         Ok(u32::from_be_bytes(b))
     }
     fn store8<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u8) -> Result<(), Exception> {
-        sys.write8(ea, v).map_err(|BusError| machine_check(ea))
+        let pa = self.data_address(ea, MemAccess::Store)?;
+        sys.write8(pa, v).map_err(|BusError| machine_check(ea))
     }
     fn store16<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u16) -> Result<(), Exception> {
         if ea & 1 == 0 {
-            return sys.write16(ea, v).map_err(|BusError| machine_check(ea));
+            let pa = self.data_address(ea, MemAccess::Store)?;
+            return sys.write16(pa, v).map_err(|BusError| machine_check(ea));
         }
         let [hi, lo] = v.to_be_bytes();
         self.store8(sys, ea, hi)?;
@@ -860,7 +888,8 @@ impl Cpu {
     }
     fn store32<P: Platform>(&mut self, sys: &mut P, ea: u32, v: u32) -> Result<(), Exception> {
         if ea & 3 == 0 {
-            return sys.write32(ea, v).map_err(|BusError| machine_check(ea));
+            let pa = self.data_address(ea, MemAccess::Store)?;
+            return sys.write32(pa, v).map_err(|BusError| machine_check(ea));
         }
         for (i, byte) in v.to_be_bytes().into_iter().enumerate() {
             self.store8(sys, ea.wrapping_add(i as u32), byte)?;
