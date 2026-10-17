@@ -130,3 +130,33 @@ internal name in `~/.claude/settings.json`:
 
 (`"IDA"` does not match anything; `mcp__plugin_ida-mcp_ida` allows the whole
 server.)
+
+If the IDA MCP server shows as disconnected, `/mcp` in Claude Code
+reconnects it. That beats working around it with headless idalib.
+
+## 2.5 IOS in IDA
+
+The IOS image can be studied the same way (chapters 10-13 used it).
+
+1. **Decompress first.** A `-mz` image is a small self-decompressor plus a ZIP
+   (chapter 9). `python3 -I tools/ciscoimg.py roms/<image>.bin --extract
+   ios.elf` writes the real IOS: an ELF with one segment at 0x80008000.
+2. **Make it a PowerPC ELF.** Cisco puts its platform code (0x33) in
+   `e_machine`, so IDA wouldn't know the CPU. Set the 16-bit big-endian
+   field at file offset 18 to 20 (`EM_PPC`) in a copy.
+3. **Load it** (MCP `open_database`, or the GUI) and let auto-analysis run.
+   For 12.4(8) that takes several minutes and finds 112 790 functions in
+   `.text` 0x80008000–0x82368B00, plus `.rodata`, `.data` and `.bss`.
+4. **Apply the annotations**: `tools/ida/ios_124_8_names.py` (exec it, then
+   `apply()`), which names the platform functions found so far (TLB pinning,
+   FPGA loader, IDMA init/completion, board ID, slot sizing...), the key
+   globals and the bitstreams.
+
+The database is about 590 MB, too big for GitHub (100 MB per file), so it
+lives in `ida-ios/`, which neither repository tracks. The four steps above
+rebuild it.
+
+Two tools complement IDA for quick questions without opening the database:
+`tools/iosdis.py IMAGE START END` (disassembly with `llvm-mc`) and
+`tools/ios_refs.py IMAGE "text"|0xADDR` (who builds this string's or
+address's value with `lis`+`addi`).

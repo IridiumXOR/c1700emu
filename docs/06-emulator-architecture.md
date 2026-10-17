@@ -1,30 +1,38 @@
 # 6. Emulator architecture
 
 ```
-emu/                      Cargo workspace
-├── ppc8xx/               the CPU core (no Cisco knowledge at all)
-│   ├── src/lib.rs        state, Platform trait, exceptions, SPRs, timebase
-│   ├── src/execute.rs    one match arm per opcode
-│   ├── src/decode_cache.rs
-│   └── tests/            semantics tests + differential tests vs qemu-ppc
-└── c1700/                the Cisco board
-    ├── src/mpc860/       on-chip peripherals (IMMR window)
-    │   ├── mod.rs        SIU, memory controller/UPM, PIT, RSR, CPM...
-    │   ├── regs.rs       register offsets
-    │   └── fec.rs        Fast Ethernet Controller + LXT971 PHY
-    ├── src/board/        what is soldered around the chip
-    │   ├── mod.rs        chip-select decoder + Platform impl
-    │   ├── iobus.rs      CS7 sub-decoder (NVRAM / CPLD / UART)
-    │   ├── uart16550.rs  nvram.rs  cookie.rs  cpld.rs  flash.rs
-    │   └── fec_dma.rs    the FEC's DMA engine (buffer-descriptor rings)
-    ├── src/net/          virtual network: smoltcp + TFTP server
+emu/                        Cargo workspace
+├── ppc8xx/                 the CPU core (no Cisco knowledge at all)
+│   ├── src/lib.rs          state, Platform trait, exceptions, SPRs, timebase, step()
+│   ├── src/execute.rs      one match arm per opcode; the load/store funnel
+│   ├── src/decode_cache.rs memo of decoded instruction words
+│   ├── src/mmu.rs          the 8xx MMU: TLBs, table-walk assist, protection (ch. 12)
+│   ├── examples/decode_bench.rs
+│   └── tests/              semantics, MMU end-to-end, differential vs qemu-ppc, throughput
+└── c1700/                  the Cisco board
+    ├── src/mpc860/         on-chip peripherals (IMMR window)
+    │   ├── mod.rs          SIU (interrupts), memory controller/UPM, PIT, RSR,
+    │   │                   CPM interrupt controller, CPCR, SPI registers, stats
+    │   ├── regs.rs         register offsets      names.rs  register names (from IDA)
+    │   └── fec.rs          Fast Ethernet Controller registers + LXT971 PHY
+    ├── src/board/          what is soldered around the chip
+    │   ├── mod.rs          chip-select decoder, Platform impl, --watch
+    │   ├── iobus.rs        CS7 sub-decoder: NVRAM, IO FPGA, DUART (console + AUX)
+    │   ├── uart16550.rs    nvram.rs  cookie.rs (model, serial)  cpld.rs (IO FPGA)
+    │   ├── fpga_config.rs  IO FPGA reg 0x4C: Xilinx slave-serial port (1760, ch. 11)
+    │   ├── flash/          amd.rs, intel.rs (x16 StrataFlash), mod.rs (persistence)
+    │   ├── flashfs.rs      Cisco flash file system (--flash-file, ch. 11)
+    │   ├── fec_dma.rs      the FEC's DMA engine (descriptor rings, ch. 8)
+    │   ├── cpm_spi.rs      CPCR commands + SPI controller (WIC ID EEPROMs, ch. 10)
+    │   └── idma.rs         IDMA memory-to-memory copies (IOS receive path, ch. 13)
+    ├── src/net/            virtual network: smoltcp host + TFTP server
     ├── src/fastforward.rs  skips the ROM's timebase busy-wait loops
-    ├── src/machine.rs    CPU + board + virtual clock + reset logic
-    ├── src/emulator.rs   machine + console, the interactive loop
-    ├── src/console.rs    terminal (raw mode) and telnet server
-    ├── src/gdb.rs        GDB stub (gdbstub crate)
-    ├── src/main.rs       command line (clap)
-    └── tests/boot.rs     boots the real ROM to the prompt
+    ├── src/machine.rs      CPU + board + virtual clock + reset logic + stats
+    ├── src/emulator.rs     machine + consoles, the interactive loop
+    ├── src/console.rs      terminal (raw mode) and telnet servers (console, AUX)
+    ├── src/gdb.rs          GDB stub (gdbstub crate)
+    ├── src/main.rs         command line (clap)
+    └── tests/              boot.rs (ROM → prompt, boot from flash), net.rs (tftpdnld)
 ```
 
 ## 6.1 Why two crates?
@@ -35,8 +43,9 @@ MPC860 through an internal bus. In the emulator that boundary is the
 
 ```rust
 pub trait Platform {
-    fn read8/16/32(&mut self, addr) -> Result<_, BusError>;
-    fn write8/16/32(&mut self, addr, value) -> Result<(), BusError>;
+    fn read8/16/32(&mut self, addr) -> Result<_, BusError>;   // physical addresses:
+    fn write8/16/32(&mut self, addr, value) -> Result<(), BusError>; // the MMU is in the core
+    fn fetch(&mut self, addr) -> Result<u32, BusError>;
     fn read_spr / write_spr(...)   // IMMR lives outside the core
     fn external_interrupt(&self) -> bool;   // from the SIU
     fn system_call(&mut self, cpu) -> bool; // test hook (Linux syscalls)
@@ -87,13 +96,23 @@ Effects that fall out of modelling the hardware instead of hard-coding a map:
 ## 6.4 On-chip peripherals (mpc860/mod.rs): registers are memory
 
 The 16 KB IMMR window is a byte array: unknown registers behave as latches.
-Only registers whose behaviour the ROM depends on have hooks: BR/OR
-(remap), MCR (UPM read/write via MDR), SIPEND/SIVEC (computed), PISCR/PITC/
-PITR (periodic timer, PS write-1-to-clear), RSR (reset cause, w1c), CPCR
-(command completes instantly), FEC (MII frames). Interrupt sources feed
-SIPEND (IRQ0-7 pins and LVL0-7 internal levels), `SIPEND & SIMASK` drives
-the core's external interrupt input, SIVEC encodes the highest-priority
-source × 4.
+Only registers whose behaviour software depends on have hooks:
+
+* **memory controller**: BR/OR (remap), MCR (UPM read/write via MDR);
+* **SIU**: SIPEND/SIVEC computed, PISCR/PITC/PITR (periodic timer), RSR
+  (reset cause, write-1-to-clear);
+* **CPM**: CPCR (commands complete instantly; INIT for SCC/SMC/SPI, INIT/STOP
+  IDMA), the CPM interrupt controller (CIPR computed from SPI and IDMA, CIVR
+  = highest-priority code, CISR write-1-to-clear), SPI (SPCOM start, SPIE
+  write-1-to-clear), IDSR1/2 (write-1-to-clear);
+* **FEC**: registers, MII frames to the PHY, GTS→GRA.
+
+Engines that need bus access (FEC DMA, SPI, IDMA) live on the board, which
+calls `run_cpm()` after every IMMR write. Interrupt sources feed SIPEND
+(IRQ0-7 pins and LVL0-7 internal levels: PIT, FEC via IVEC, the CPM via
+CICR), `SIPEND & SIMASK` drives the core's external interrupt input, and
+SIVEC encodes the highest-priority source × 4. With `--stats`, every IMMR
+register access is counted; that table found most of the IOS bugs.
 
 ## 6.5 Virtual time (machine.rs)
 
@@ -109,7 +128,8 @@ instructions (`DEVICE_SYNC_INTERVAL`). Consequences:
   every 960 000 instructions, regardless of host speed;
 * when the guest spins waiting for a key (the UART counts consecutive
   "no data" LSR polls), the emulator sleeps 5 ms per slice so it does not
-  burn a host core.
+  burn a host core. IOS's idle loop is not detected yet: an idle router
+  still runs at full speed (chapter 14).
 
 ## 6.6 Resets
 
@@ -123,21 +143,27 @@ EHRS|ESRS (0xC0000000), the documented reset value.
 
 | Device | Model |
 |--------|-------|
-| UART | 16550 with DLAB, 16-byte RX FIFO, LSR (DR/OE/BI/THRE/TEMT), IIR priorities, BREAK = BI + NUL, IRQ → SIU IRQ1 |
-| NVRAM | 32 KB byte array persisted to `c1700-nvram.bin`; blank = 0xFF; a valid default cookie is written if missing |
-| CPLD | 256 latches, board id strap read-only, LED changes logged |
-| Flash | 2 × Am29F016 interleaved, AMD command state machine per chip (unlock, autoselect, program, sector/chip erase), instant completion, persisted to `c1700-flash.bin` |
-| FEC | registers, MII management with an LXT971 PHY, and a DMA engine walking the Tx/Rx descriptor rings (chapter 8) |
-| Network | smoltcp-based virtual host (10.0.2.2 / 10.0.2.1): ARP, ping, read-only TFTP server |
+| DUART | NS16552: two 16550 channels (A = console, B = AUX at +8, `--aux-tcp`); DLAB, 16-byte RX FIFO, LSR, IIR priorities, BREAK = BI + NUL, IRQ → SIU IRQ1 |
+| NVRAM | 32 KB persisted to `c1700-nvram.bin`; a valid default cookie (model PM ID, MAC, serial) is written if missing |
+| IO FPGA ("CPLD") | 256 latches, board-type strap, LED, WIC select for SPI; reg 0x4C = Xilinx configuration port (PROG_B/INIT_B/CCLK/DIN/DONE) |
+| Flash | Intel StrataFlash x16 (8/16/32 MB, default) or 2 × AMD Am29F016 (4 MB): command state machines, instant completion, persisted to `c1700-flash.bin`; Cisco flash file system builder |
+| FEC | registers, MII management with an LXT971 PHY, DMA engine walking the Tx/Rx descriptor rings |
+| SPI | master transfers over the descriptor rings; the WIC/VIC ID EEPROMs answer 0xFF (empty slots) |
+| IDMA | memory-to-memory transfers requested via PCSO[DREQ0/1], DONE/AD interrupts |
+| MMU | in the core (`ppc8xx/src/mmu.rs`), see chapter 12 |
+| Network | smoltcp virtual host (10.0.2.2 / 10.0.2.1): ARP, ping, read-only TFTP server |
 
 ## 6.8 Performance notes
 
-* CPU core alone: ~108 MIPS (flat RAM, release build).
-* Full board: ~28 MIPS; boot to the prompt = 183 M instructions ≈ 6.6 s.
-* `--profile` shows 73 % of the boot is the ROM's byte-by-byte `bzero` of
-  all RAM and 26 % its timebase delay loops — the ROM is slow, not the
-  emulator. Using `--ram 16` halves the clearing time.
-* The `mftb` busy-waits are now fast-forwarded (`fastforward.rs`, chapter 8):
-  boot 6.9 → 5.2 s, writing an image to flash ~70 → ~4 s, same virtual time.
-* Ideas if more speed is ever needed: a per-page fast path for instruction
-  fetch, or avoiding the interrupt-line recomputation on every MMIO access.
+* CPU core alone (flat RAM, release build): ~88 MIPS today, ~102 before the
+  MMU checks were added (the overhead with translation off is a known
+  speed item).
+* Full board, ROMMON: boot to the prompt ≈ 5.2 s (183 M instructions; 73% is
+  the ROM's byte-by-byte `bzero` of all RAM).
+* Full board, IOS with translation on: **~23 MIPS**, i.e. about half the
+  speed of the real 48 MHz MPC860. IOS reaches `Router>` after ~5 minutes:
+  ~2.5 min self-decompression, ~2.5 min initialisation.
+* The `mftb` busy-waits of the ROM are fast-forwarded (`fastforward.rs`,
+  chapter 8): boot 6.9 → 5.2 s, writing an image to flash ~70 → ~4 s.
+* Where the time could go: chapter 14 (snapshots, interpreter profiling,
+  idle detection, and what a JIT would involve).

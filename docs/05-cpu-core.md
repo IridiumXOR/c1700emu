@@ -5,8 +5,10 @@ instruction word becomes an action, how the flags (XER, CR) are computed, how
 the 8xx exception model works, and how we *prove* the implementation is right
 by comparing it against QEMU.
 
-Code: `emu/ppc8xx/src/lib.rs` (state, exceptions, SPRs, timebase) and
-`emu/ppc8xx/src/execute.rs` (one `match` arm per instruction).
+Code: `emu/ppc8xx/src/lib.rs` (state, exceptions, SPRs, timebase),
+`emu/ppc8xx/src/execute.rs` (one `match` arm per instruction),
+`emu/ppc8xx/src/decode_cache.rs` and `emu/ppc8xx/src/mmu.rs` (the 8xx MMU,
+chapter 12).
 
 ---
 
@@ -35,9 +37,24 @@ against a tiny "fake Linux" used by the tests.
 
 1. **Asynchronous interrupts** (only if `MSR[EE]=1`): external interrupt first,
    then decrementer. They are taken *between* instructions.
-2. **Fetch** the word at `pc` (a bus error here = Machine Check).
-3. **Decode** with the `powerpc` crate and **execute**.
+2. **Translate** `pc` through the ITLB when `MSR[IR]=1` (a miss or a
+   protection fault becomes an ITLB miss/error exception), then **fetch**
+   the word at the physical address (a bus error here = Machine Check).
+3. **Decode** (decode cache in front of the `powerpc` crate) and **execute**.
+   Every load/store goes through one funnel (`load8/16/32`, `store8/16/32`)
+   that translates through the DTLB when `MSR[DR]=1`.
 4. **Tick** the virtual clock (timebase/decrementer).
+
+```
+             ┌──────────── Cpu::step ────────────┐
+ pending IRQ?│ EE && (external || decrementer)   │──► exception entry
+             │ pc ──ITLB (IR)──► pa ──fetch──►   │
+             │ word ──decode cache──► Ins        │
+             │ execute(Ins): ALU / branch / SPR  │
+             │   loads/stores: ea ──DTLB (DR)──► pa ──Platform──► board
+             │ tick(): cycles++, TB/DEC          │
+             └───────────────────────────────────┘
+```
 
 ---
 
@@ -216,6 +233,14 @@ decrements CTR (that form is invalid).
 
 A data access nobody answers becomes a **Machine Check** with DAR = address.
 
+With `MSR[DR]=1` the effective address is first translated by the DTLB
+(chapter 12): no matching entry → **DTLB miss** (0x1200); a matching entry
+that forbids the access → **DTLB error** (0x1400) with DSISR/DAR. An
+aligned half/word can't cross a page and is translated once; misaligned
+accesses are split into bytes, each translated on its own. `icbi`, `dcbst`,
+`dcbf` and `dcbi` have no cache to act on but still translate their address,
+so they can fault like on the real core.
+
 ---
 
 ## 7. The 8xx exception model
@@ -245,6 +270,11 @@ On an exception the core does (MPC860UM ch. 6):
   relies on exactly this (see chapter 03).
 * Privilege: any SPR whose number has bit 4 (`0x10`) set is supervisor-only
   (SRR0/1, SPRGs, DEC, IMMR...). From user mode → Program exception.
+* **MMU exceptions** (chapter 12): ITLB miss 0x1100 (SRR1 bits 4 and 10),
+  DTLB miss 0x1200, ITLB error 0x1300 (SRR1 bit 1 = not mapped, 3 =
+  guarded, 4 = protection), DTLB error 0x1400 (DSISR bits 1/4/6, DAR = EA).
+  Exception entry clears IR/DR, so handlers run untranslated; `rfi` restores
+  them from SRR1.
 
 ### SPR quirks
 
@@ -253,7 +283,8 @@ On an exception the core does (MPC860UM ch. 6):
 | `EIE` (80) / `EID` (81) / `NRI` (82) | the value written is ignored; *the write itself* sets EE+RI / clears EE, sets RI / clears EE+RI. A one-instruction interrupt enable/disable. |
 | `IC_CST` (560) / `DC_CST` (568) | writes are *commands* (0x02000000 enable, 0x04000000 disable, 0x0A.. unlock all, 0x0C.. invalidate all); reads show the enable bit in bit 0. |
 | `IMMR` (638) | delegated to the platform — its value moves the whole on-chip peripheral block. |
-| `M_TW` (799), debug and MMU registers | stored, not modelled. The Cisco exception handlers use `M_TW` as a free scratch register. |
+| MMU registers (784-799, 816-826) | modelled by `mmu.rs` (chapter 12): reading `M_TWB`/`MD_TWC` returns table-walk addresses, writing `Mx_RPN` loads a TLB entry. `M_TW` is a plain scratch register (the Cisco ROM's handlers use it). |
+| debug comparators, `ICTRL`... | stored, not modelled. |
 | `PVR` (287) | `0x00500000` = MPC860. |
 
 ### Virtual time
@@ -334,20 +365,28 @@ The test skips itself (with a message) if `qemu-ppc-static`, `llvm-mc` or
 * The unit tests caught three mistakes — all in my *expectations* (e.g. the
   value of an `rlwimi` I had computed by hand), none in the CPU.
 
+### MMU tests
+
+8 unit tests in `mmu.rs` and 3 end-to-end tests in `tests/mmu.rs`, where
+real code takes TLB misses and the reload handlers from the manual
+(Figures 8-23/8-24) refill the TLB through the table-walk assist (chapter 12).
+
 ### Speed
 
-`cargo test --release -p ppc8xx --test throughput -- --ignored --nocapture`:
-about **108 million instructions/second** on a flat-RAM platform. The real
-board adds address decoding, but the ROM's memory tests will still run in a
-blink.
+`cargo test --release -p ppc8xx --test throughput -- --ignored --nocapture`
+on a flat-RAM platform: **~88 million instructions/second** today, **~102**
+at the commit before the MMU (same machine, measured back to back). The
+translation checks cost ~14% even with translation off, more than they
+should; that's on the speed list (chapter 14). On the real board, under
+IOS with translation on, the whole emulator does **~23 MIPS** (address
+decoding, devices, TLB lookups).
 
 ---
 
 ## 9. Known limitations
 
-* No MMU translation (the ROM never enables it; a warning is logged if
-  software sets MSR[IR/DR]).
-* No trace (MSR[SE]/[BE]) or debug-breakpoint exceptions; no cache model.
+* No trace (MSR[SE]/[BE]) or debug-breakpoint exceptions; no cache model
+  (so the MMU's write-through/cache-inhibit attributes have no effect).
 * `divw`/`divwu` undefined cases return 0 with OV set.
 * `dcbz` always clears the line (no cache-inhibited alignment exception).
 * Big-endian only (MSR[LE] is ignored).

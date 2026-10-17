@@ -275,3 +275,4 @@ private `c1700emu-roms` repository, see §2).
 | 11 | [Internal flash & router model](11-internal-flash-and-models.md) |
 | 12 | [The MPC8xx MMU](12-mmu.md) |
 | 13 | [IOS networking](13-ios-networking.md) |
+| 14 | [Speed and JIT](14-speed-and-jit.md) |
