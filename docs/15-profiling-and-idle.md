@@ -153,43 +153,17 @@ instruction fetch. These numbers are the input for the JIT decision
 
 ## 15.8 Steps 1 and 2: ROM accelerator and interpreter fast paths
 
-Benchmark: power-on to 3 billion instructions with the IOS image in flash
-(ROMMON plus nearly all of IOS's self-decompression, no idle time), wall
-time with the console off. Each step was measured on its own:
+The two items this profile pointed at were done next, and are described in
+detail in **chapter 16**:
 
-| step | MIPS | note |
-|---|---|---|
-| start | 27.4 | |
-| bus fast paths: `region()` split into an inline table lookup and a cold decoder; DRAM/ROM reads, writes and fetches inline; one-load big-endian helpers | 31.8 | +16% |
-| network polled only when needed (frames from the guest, a running transfer, 20 ms housekeeping) | 31.8 | no gain: `perf`'s line attribution inside the inlined loop had pointed there wrongly |
-| hook pages: per-address hooks checked only on the few 4 KB pages that have them | 33.1 | +4% |
-| decode cache indexed by address instead of a hash of the word | 37.8 | +14% (core benchmark +8%) |
-| `Cpu::run_batch`: `step` inlined into one loop, no call per guest instruction | **40.3** | +7% |
-
-Total **+47%**. What's left is the interpreter doing its real work: fetch,
-decode and translation (~40%), instruction semantics (~34%), loads/stores
-(~13%), device sync (~8%). Going much further needs pre-decoded blocks or a
-JIT (chapter 14).
-
-**ROM memory clear** (`fastforward.rs`): ROMMON's `bzero_bytes` loop
-(4 instructions per byte) is replaced by one bulk fill of plain DRAM, with
-registers, CR1, PC and virtual time left as the loop would leave them:
-
-| ROMMON boot to `rommon 1 >` | before | after |
-|---|---|---|
-| 32 MB | 8.0 s | 0.1 s |
-| 128 MB | 25.7 s | 0.2 s |
-
-**Exactness, proven instead of claimed.** `tests/boot.rs::rom_accelerators_are_exact`
-boots the ROM with and without the accelerators and stops both at
-ROMMON's first key poll. Cycle count, timebase, registers, CR, console
-output and all of RAM must be identical, and are. The bulk fill was exact
-from the start; the test found three bugs in the older delay-loop
-fast-forward (chapter 8.6), and fixing one of them first made the network
-test 3× slower. That was a lesson in its own right: PIT expiries bound a
-skip only when the PIT interrupt is unmasked. ROMMON polls a masked PIT,
-whose sticky PS flag makes merged expiries indistinguishable on real
-hardware too.
+1. the ROM's byte-by-byte memory clear is done as one bulk fill, with a test
+   proving the result identical to running the loop (ROMMON boot with
+   128 MB: 25.7 → 0.2 s);
+2. the interpreter's fixed costs were cut: bus fast paths, hook pages, an
+   address-indexed decode cache and a batch loop. +47% on the benchmark,
+   32.5 million executed instructions per second (the 40.3 "MIPS" first
+   written here counted the instructions skipped by the memory clear; see
+   chapter 16.1).
 
 **Result for IOS** (same scenario as 15.6):
 

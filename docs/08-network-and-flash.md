@@ -166,7 +166,7 @@ the ROM takes the interrupt, comes back, and the rest is skipped). Virtual
 time is unchanged; wall time for the flash write dropped from ~70 s to ~4 s,
 and the boot from 6.9 s to 5.2 s. `--no-fast-forward` turns it off.
 
-*Correction (chapter 15.8):* "virtual time is unchanged" was a claim, not a
+*Correction (chapter 16.7):* "virtual time is unchanged" was a claim, not a
 measurement. A test that boots with and without the fast-forward and
 compares everything at the same instruction (`rom_accelerators_are_exact`)
 found three precision bugs, now fixed:

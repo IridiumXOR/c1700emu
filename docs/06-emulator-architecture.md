@@ -156,13 +156,13 @@ EHRS|ESRS (0xC0000000), the documented reset value.
 
 ## 6.8 Performance notes
 
-* CPU core alone (flat RAM, release build): ~88 MIPS today, ~102 before the
-  MMU checks were added (the overhead with translation off is a known
-  speed item).
+* CPU core alone (flat RAM, release build): ~94 MIPS (~102 before the MMU
+  checks were added).
 * Full board, ROMMON: boot to the prompt ≈ 0.1 s with 32 MB (the ROM's
   byte-by-byte `bzero` of all RAM, 73% of the instructions, is done in bulk).
-* Full board: **~40 MIPS** on the IOS decompression benchmark (27 before the
-  fast paths of chapter 15.8). IOS reaches `Router>` in ~2.5 minutes (it
+* Full board: **~32.5 million executed instructions per second** on the IOS
+  decompression benchmark (`tools/bench.sh`; +47% from the fast paths of
+  chapter 16). IOS reaches `Router>` in ~2.5 minutes (it
   was 5.3), mostly self-decompression.
 * The `mftb` busy-waits of the ROM are fast-forwarded (`fastforward.rs`,
   chapter 8): boot 6.9 → 5.2 s, writing an image to flash ~70 → ~4 s.

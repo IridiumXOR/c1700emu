@@ -113,7 +113,7 @@ used a hash of the word, which spread even straight-line code over the
 whole 128 KB table, so almost every lookup missed the host's L1 cache;
 `perf` showed it as the hottest spot of the interpreter. Address indexing
 puts consecutive instructions in consecutive slots (8 per cache line):
-+8% on the core benchmark, +14% on the full board (chapter 15.8).
++8% on the core benchmark, +14% on the full board (chapter 16.5).
 
 ### The batch loop
 
@@ -394,8 +394,8 @@ real code takes TLB misses and the reload handlers from the manual
 on a flat-RAM platform: **~94 million instructions/second** today (~88 after
 the MMU was added, ~102 before it; same machine, measured back to back). The
 translation checks still cost a little even with translation off. On the
-real board the whole emulator does **~40 MIPS** on the IOS decompression
-benchmark (it was ~27 before the work in chapter 15.8).
+real board the whole emulator does **~32.5 MIPS** on the IOS decompression
+benchmark (`tools/bench.sh`; +47% from the work in chapter 16).
 
 ---
 

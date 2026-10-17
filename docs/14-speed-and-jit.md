@@ -144,8 +144,9 @@ The bigger wins for the *experience* of using the emulator aren't the JIT:
    seconds. That turns the 5-minute boot into a few seconds no matter how
    fast the CPU is.
 2. **Profile and fix the cheap overheads** with `perf`. **Done**
-   (chapter 15.8): +47% interpreter speed (27 → 40 MIPS), the ROM's memory
-   clear in bulk, IOS boot 216 → 153 s.
+   (chapter 16): +47% interpreter speed (22 → 32.5 million executed
+   instructions per second), the ROM's memory clear in bulk, IOS boot
+   216 → 153 s.
 3. **IOS idle detection**: recognise the idle loop and advance virtual time
    to the next timer interrupt. **Done** (chapter 15): boot 318 → 206 s, an
    idle router uses ~0% CPU.

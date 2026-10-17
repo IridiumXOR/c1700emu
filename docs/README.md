@@ -24,6 +24,7 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 13 | [IOS networking](13-ios-networking.md) | why received frames got stuck, the `--watch` tool, the IDMA copy engine, the first ping |
 | 14 | [Speed and JIT](14-speed-and-jit.md) | where an interpreter spends its time, how a JIT works, what it would take here, the plan |
 | 15 | [Profiling and idle detection](15-profiling-and-idle.md) | guest and host profiles, how IOS idles, the idle-PC detector, results |
+| 16 | [Making the interpreter faster](16-interpreter-optimisations.md) | the benchmark, each optimisation with its measured effect, exact ROM accelerators, what is left |
 
 Reference material:
 
@@ -41,4 +42,5 @@ Reference material:
 * `tools/gdb_sample.py` — finds where a guest hangs: runs it under the GDB stub, interrupts, dumps the PC and code.
 * `tools/ios_session.py` — drives an IOS boot and a list of commands unattended (setup dialog, `show`, `ping`...).
 * `tools/ios_refs.py` — finds code referencing a string or an address in a decompressed IOS image.
+* `tools/bench.sh` — the CPU engine benchmark (power-on to 3 billion executed instructions with IOS in flash).
 * `tools/ida/ios_124_8_names.py` — IDA annotations for IOS 12.4(8) (the database stays local in `ida-ios/`).
