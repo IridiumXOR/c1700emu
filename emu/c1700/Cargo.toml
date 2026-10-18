@@ -22,6 +22,7 @@ crc32fast = "1.5.2"
 tftp-packet = "0.1"
 tun-tap = { version = "0.1.4", default-features = false }
 lz4_flex = "0.14.0"
+toml = "0.9"
 
 [dev-dependencies]
 powerpc-asm = "0.4.1"

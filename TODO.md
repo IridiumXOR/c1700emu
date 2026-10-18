@@ -73,6 +73,15 @@ Chapter references are to `docs/`.
       cabled twice with a DCE end each (chapter 23.7,
       tools/tests/serial_2t_test.sh).
 
+- [x] 21. Configuration file (`--config FILE`, TOML, command line wins)
+      and boot options in NVRAM: `--confreg` keeps the ROMMON area valid,
+      `--rommon-var`, `--startup-config FILE`, `--nvram-info` (docs ch. 7.7,
+      tools/examples/, tools/tests/startup_config_test.sh).
+
+- [x] 22. GDB with the JIT at full speed: breakpoints are JIT hooks (the JIT
+      restarts when they change); a breakpoint in IOS's scheduler is reached
+      in 6.6 s instead of 124 s (docs ch. 7.3, c1700/tests/gdb_jit.rs).
+
 ## IDA and docs
 
 - [x] 14. 0x43a0 is ROMMON's stack, holding a copy of its checksum

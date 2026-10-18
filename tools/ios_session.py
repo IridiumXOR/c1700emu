@@ -17,7 +17,8 @@ snapshot is saved (--snapshot FILE), "core" sends Ctrl-] d (ELF core dump,
 --core FILE), "host CMD" runs CMD on the host and logs its output (e.g. a
 ping to the router over a TAP device).
 LOG gets the console; LOG.stderr the emulator's stderr (stats).
-Environment: LIMIT = overall deadline in seconds (default 1500); SCALE =
+Environment: IOS_HOSTNAME = the router's hostname, for its prompt (default
+Router); LIMIT = overall deadline in seconds (default 1500); SCALE =
 factor for every individual wait (default 1; slow modes such as
 --cpu jit-check need e.g. SCALE=10 LIMIT=20000).
 """
@@ -85,21 +86,27 @@ if image not in ("-", "@"):
     for l in ["IP_ADDRESS=10.0.2.15", "IP_SUBNET_MASK=255.255.255.0", "DEFAULT_GATEWAY=10.0.2.1",
               "TFTP_SERVER=10.0.2.2", f"TFTP_FILE={image}", "tftpdnld -r"]:
         send(l + "\r"); time.sleep(0.4)
+# The prompt is the router's hostname: IOS_HOSTNAME when a startup-config
+# sets another one (e.g. --startup-config).
+host = os.environ.get("IOS_HOSTNAME", "Router")
+user_prompt, enable_prompt = host + ">", host + "#"
 if image == "@":
-    send("\r"); r = wait_for("Router>", "Router#", limit=60); mark(f"restored, prompt: {r!r}")
+    send("\r"); r = wait_for(user_prompt, enable_prompt, limit=60); mark(f"restored, prompt: {r!r}")
 else:
-    r = wait_for("[yes/no]:", "*** ", limit=1400); mark(f"setup dialog: {r!r}")
-if r == "[yes/no]:":
-    send("no\r")
-    # With a serial interface fitted IOS offers to stop AutoInstall first.
-    if wait_for("Press RETURN", "terminate autoinstall?", limit=300) == "terminate autoinstall?":
-        send("\r"); wait_for("Press RETURN", limit=300)
+    # No setup dialog when NVRAM holds a startup-config.
+    r = wait_for("[yes/no]:", "*** ", "Press RETURN", limit=1400); mark(f"setup dialog: {r!r}")
+if r in ("[yes/no]:", "Press RETURN"):
+    if r == "[yes/no]:":
+        send("no\r")
+        # With a serial interface fitted IOS offers to stop AutoInstall first.
+        if wait_for("Press RETURN", "terminate autoinstall?", limit=300) == "terminate autoinstall?":
+            send("\r"); wait_for("Press RETURN", limit=300)
     for _ in range(3):
-        send("\r"); r = wait_for("Router>", limit=60)
+        send("\r"); r = wait_for(user_prompt, limit=60)
         if r:
             break
     mark(f"prompt: {r!r}")
-if r in ("Router>", "Router#"):
+if r in (user_prompt, enable_prompt):
     for c in cmds:
         if c.startswith("wait "):
             # also look at what the previous command already printed

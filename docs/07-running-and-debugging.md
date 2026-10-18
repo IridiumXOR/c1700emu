@@ -121,6 +121,19 @@ Notes:
   register from GDB does not consume a received character).
 * The FPU/AltiVec registers GDB shows are always 0: the MPC860 has neither.
 * When GDB detaches, emulation continues normally.
+* **With the JIT** (`--cpu jit`) everything works the same, at the JIT's
+  speed. Breakpoints are hook addresses for the JIT: translated code ends
+  before them and the dispatcher stops there, and the JIT starts afresh
+  whenever the set of breakpoints changes (old translations may run
+  through a new breakpoint). Single steps run one instruction, and memory
+  written from GDB goes through the board's code watch, so a patched
+  instruction is what runs next. (The interpreter still checks
+  breakpoints before every instruction, on its slower per-instruction
+  path.) Reaching a breakpoint in IOS's scheduler loop (0x80617648) from
+  power-on with `--idle off`: **6.6 s with the JIT, 124 s with the
+  interpreter**. Test: `c1700/tests/gdb_jit.rs`, a small GDB
+  remote-protocol client that breaks inside a translated loop on every
+  iteration, single-steps and patches the loop from GDB.
 
 Real example from development (chapter 4): the ROM crashed at 0x62000000.
 
@@ -189,12 +202,94 @@ pointer scans). It sits right after the first banner in the ROM image.
 See chapter 8 for a complete `tftpdnld` session (`tools/mkimage.py` builds
 a test image). Frame-level logging: `RUST_LOG=c1700emu::net=debug --log net.log`.
 
-## 7.7 Known limitations / next steps
+## 7.7 Configuration files and what NVRAM keeps
 
-* The virtual network only offers ARP, ping (since chapter 13) and a read-only TFTP server
-  (no bridging to the host network).
-* No MMU emulation (identity mapping): fine for ROMMON, and enough for IOS
-  12.3(11)T2 to boot to its setup dialog (chapter 9), but not guaranteed for
-  everything IOS does.
+**What persists between two runs.** The emulator's own options don't: each
+run starts from its command line. The router's state does, in two files
+saved every two seconds and at exit:
+
+* `c1700-flash.bin` (`--flash`): the internal flash and its file system
+  (IOS images, files copied with IOS).
+* `c1700-nvram.bin` (`--nvram`): the NVRAM, with everything a real router
+  keeps there:
+
+  | offset | owner | content |
+  |---|---|---|
+  | 0x000 | ROMMON | cookie: MAC address, serial number, chassis model |
+  | 0x090 | ROMMON | configuration register (+ complement, magic 0xFEEDFACE) |
+  | 0x094-0x65A | ROMMON | monitor area: variables (`set` at the prompt) at 0x148, aliases at 0x448, checksum at 0x658 |
+  | 0x808 | IOS | startup-config (`write memory`): header (magic 0xABCD), text |
+  | after it | IOS | private config (0xFEDC), NVRAM files (0xDCBA, e.g. `ifIndex-table`) |
+
+  Layouts from the ROM (`sub_FFF0B728`, `sub_FFF0B8BC`) and IOS
+  (`sub_80C82648`, `sub_80C85B24`), checked against an NVRAM IOS wrote. The
+  ROM's checksum makes the 16-bit sum of its area 0; IOS's is the complement
+  of the ones'-complement sum from its header to the end of the NVRAM.
+
+**Configuration files.** `--config FILE` reads options from a TOML file:
+each command-line option without its dashes, `option = value`. Booleans
+are `true`/`false`, repeatable options take a list, and options given on
+the command line override the file (`tools/examples/c1760-ios.toml`):
+
+```toml
+model = "1760"
+ram = 128
+flash-file = ["roms/c1700-adventerprisek9-mz.124-8.bin"]
+confreg = "0x2102"
+startup-config = "tools/examples/router.cfg"
+cpu = "jit"
+```
+
+```bash
+c1700emu --config tools/examples/c1760-ios.toml              # as written
+c1700emu --config tools/examples/c1760-ios.toml --cpu interp # one option changed
+```
+
+(It works by turning the file into options placed before the command
+line's, with clap's `args_override_self`; an unknown key is an unknown
+option. Relative paths are relative to the current directory.)
+
+**Boot options in NVRAM.** What the router reads from NVRAM can be set
+from outside, before it boots:
+
+| option | writes | as on the router |
+|---|---|---|
+| `--confreg 0x2102` | configuration register | `confreg` in ROMMON, `config-register` in IOS |
+| `--rommon-var NAME=VALUE` (repeat) | ROMMON variables (empty value: removed) | `NAME=VALUE` + `sync` at the ROMMON prompt |
+| `--startup-config FILE` | IOS startup-config (format 1, plain text) | `write memory` |
+| `--nvram-info` | nothing: prints the configuration register, the ROMMON variables and the startup-config, and exits | `set`, `show startup-config` |
+
+The monitor area is kept valid (its checksum fixed), so the ROM's old
+"monitor nvram area is corrupt" warning after `--confreg` is gone. With
+`--startup-config` IOS skips the setup dialog and boots straight into that
+configuration (the private config is left empty). Note that it replaces
+what IOS saved with `write memory`, at every start where it is given.
+
+```
+$ c1700emu --nvram c1760-nvram.bin --nvram-info
+configuration register: 0x2102
+ROMMON variables:
+  PS1=rommon ! >
+  BSI=0
+  WARM_REBOOT=FALSE
+IOS startup-config (527 bytes):
+!
+version 12.4
+...
+hostname emutest
+```
+
+**Tests:** `board::nvram_config::tests` (variables, configuration register,
+startup-config round trip and checksum), the `--config` unit tests in
+`main.rs`, and `tools/tests/startup_config_test.sh` (IOS boots a fresh NVRAM
+with `tools/examples/router.cfg`: prompt `emu1>`, pings the virtual host;
+`--nvram-info` shows the configuration).
+
+## 7.8 Known limitations
+
+* The virtual network offers ARP, ping and a read-only TFTP server; real
+  networks go through TAP or UDP (chapter 18).
 * `xmodem`/`dnld` serial downloads should work through the console but are
   untested.
+* IOS startup-configs in the compressed format (`service compress-config`,
+  format 2) are not read or written by `--startup-config`/`--nvram-info`.
