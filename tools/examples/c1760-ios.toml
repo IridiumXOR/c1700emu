@@ -1,0 +1,39 @@
+# c1700emu configuration file: c1700emu --config tools/examples/c1760-ios.toml
+#
+# Every command-line option can be given here, without the leading dashes:
+#   option = "text" | number | true      (false = option not given)
+#   option = ["a", "b"]                  (repeatable options)
+# Options on the command line override this file. Relative paths are
+# relative to the directory you start the emulator in.
+
+# --- the machine ---
+model = "1760"                 # 1720, 1721, 1750, 1751 or 1760
+ram = 128                      # MB
+# rom = "roms/CISCO_bootrom_AT27C040.bin"
+# wic0 = "wic-1t"              # serial card in WIC slot 0 (or "wic-2t")
+
+# --- persistent state ---
+nvram = "c1760-nvram.bin"
+flash = "c1760-flash.bin"
+# Put the IOS image into the flash (only needed until the flash file holds it):
+flash-file = ["roms/c1700-adventerprisek9-mz.124-8.bin"]
+
+# --- boot options, written into NVRAM before booting ---
+confreg = "0x2102"             # 0x2102 boot IOS, 0x2100 stay in ROMMON, +0x8000 diagnostics
+# rommon-var = ["TFTP_SERVER=10.0.2.2", "IP_ADDRESS=10.0.2.15"]
+# IOS startup-config (replaces the one IOS saved with `write memory`):
+# startup-config = "tools/examples/router.cfg"
+
+# --- CPU and time ---
+cpu = "jit"                    # "interp" is the reference interpreter
+# idle = "off"                 # boot fast (virtual time runs ahead of the wall clock)
+
+# --- consoles and network ---
+# tcp = 2323                   # console also on telnet 127.0.0.1 2323
+# net = "tap:tap0"             # default "virtual": host 10.0.2.2 (ping, TFTP)
+# serial0 = "udp:31000:127.0.0.1:31001"
+
+# --- diagnostics ---
+# stats = true
+# log = "c1700emu.log"
+# log-level = "info"

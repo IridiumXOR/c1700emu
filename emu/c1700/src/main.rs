@@ -13,7 +13,7 @@
 //! ```
 
 use c1700emu::board::wic::WicKind;
-use c1700emu::board::{BoardConfig, cookie, flashfs, nvram::Nvram};
+use c1700emu::board::{BoardConfig, cookie, flashfs, nvram::Nvram, nvram_config};
 use c1700emu::console::Console;
 use c1700emu::emulator::Emulator;
 use c1700emu::gdb;
@@ -27,7 +27,17 @@ use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Emulator for the Cisco C1700 (MPC860T) System Bootstrap ROM")]
+// A later occurrence of an option replaces an earlier one: the options from
+// --config come first, so the command line wins.
+#[command(args_override_self = true)]
 struct Args {
+    /// Read options from a TOML file: `option = value` for each command-line
+    /// option, without the leading dashes (e.g. `model = "1760"`, `ram = 128`,
+    /// `cpu = "jit"`, `stats = true`, `flash-file = ["ios.bin"]`). Options
+    /// given on the command line override the file. See docs ch. 7.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
     /// Boot ROM image (512 KB AT27C040 dump).
     #[arg(long, default_value = "roms/CISCO_bootrom_AT27C040.bin")]
     rom: PathBuf,
@@ -108,6 +118,22 @@ struct Args {
     /// (0x8000 = diagnostic messages, 0x2102 = typical IOS default).
     #[arg(long, value_parser = parse_u16)]
     confreg: Option<u16>,
+
+    /// Set a ROMMON variable in NVRAM before booting, NAME=VALUE (an empty
+    /// value removes it); repeat for more. E.g. the tftpdnld variables
+    /// IP_ADDRESS, TFTP_SERVER, TFTP_FILE... (docs ch. 7.7)
+    #[arg(long = "rommon-var", value_name = "NAME=VALUE")]
+    rommon_vars: Vec<String>,
+
+    /// Install this text file as IOS's startup-config in NVRAM before
+    /// booting (what `write memory` stores). Replaces the saved one.
+    #[arg(long, value_name = "FILE")]
+    startup_config: Option<PathBuf>,
+
+    /// Print what the NVRAM file (--nvram) holds: configuration register,
+    /// ROMMON variables, IOS startup-config. Then exit; nothing is changed.
+    #[arg(long)]
+    nvram_info: bool,
 
     /// Serve files from this directory over TFTP on the virtual network
     /// (for ROMMON's `tftpdnld`; set TFTP_SERVER to --net-server-ip).
@@ -292,16 +318,62 @@ fn setup_logging(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn write_confreg(nvram: &mut Nvram, value: u16) {
-    let bytes = nvram.bytes_mut();
-    bytes[0x90..0x92].copy_from_slice(&value.to_be_bytes());
-    bytes[0x92..0x94].copy_from_slice(&(!value).to_be_bytes());
-    bytes[0x94..0x98].copy_from_slice(&0xFEED_FACEu32.to_be_bytes());
+/// The command line with the options of its `--config FILE` (if any) put
+/// in front of it, so that the command line's own options win.
+fn with_config_file(argv: Vec<String>) -> Result<Vec<String>, String> {
+    let mut path = None;
+    for (i, arg) in argv.iter().enumerate() {
+        if let Some(p) = arg.strip_prefix("--config=") {
+            path = Some(p.to_string());
+        } else if arg == "--config" {
+            path = argv.get(i + 1).cloned();
+        }
+    }
+    let Some(path) = path else { return Ok(argv) };
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("--config {path}: {e}"))?;
+    let options = config_to_args(&text).map_err(|e| format!("--config {path}: {e}"))?;
+    Ok(argv[..1].iter().cloned().chain(options).chain(argv[1..].iter().cloned()).collect())
+}
+
+/// Turn a TOML configuration into command-line options: `key = value` gives
+/// `--key=value`, `key = true` gives `--key` (false: nothing), and an array
+/// repeats the option (`flash-file = ["a.bin", "b.bin"]`). Unknown keys are
+/// reported by the option parser like unknown options.
+fn config_to_args(text: &str) -> Result<Vec<String>, String> {
+    let table: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+    let mut args = Vec::new();
+    for (key, value) in table {
+        let key = key.replace('_', "-");
+        let one = |v: &toml::Value| -> Result<String, String> {
+            match v {
+                toml::Value::String(s) => Ok(s.clone()),
+                toml::Value::Integer(n) => Ok(n.to_string()),
+                toml::Value::Float(f) => Ok(f.to_string()),
+                other => Err(format!("{key}: unsupported value {other}")),
+            }
+        };
+        match &value {
+            toml::Value::Boolean(true) => args.push(format!("--{key}")),
+            toml::Value::Boolean(false) => {}
+            toml::Value::Array(items) => {
+                for item in items {
+                    args.push(format!("--{key}={}", one(item)?));
+                }
+            }
+            v => args.push(format!("--{key}={}", one(v)?)),
+        }
+    }
+    Ok(args)
 }
 
 fn main() -> Result<(), String> {
-    let args = Args::parse();
+    let args = Args::parse_from(with_config_file(std::env::args().collect())?);
     setup_logging(&args)?;
+    if args.nvram_info {
+        let bytes = std::fs::read(&args.nvram).map_err(|e| format!("{}: {e}", args.nvram.display()))?;
+        print!("{}", nvram_config::describe(&bytes));
+        return Ok(());
+    }
 
     let rom_path = find_file(&args.rom);
     let rom = std::fs::read(&rom_path).map_err(|e| format!("cannot read ROM {}: {e}", rom_path.display()))?;
@@ -329,8 +401,21 @@ fn main() -> Result<(), String> {
         cookie::set_mac(nvram.bytes_mut(), mac);
     }
     if let Some(cr) = args.confreg {
-        write_confreg(&mut nvram, cr);
+        nvram_config::set_confreg(nvram.bytes_mut(), cr);
     }
+    if !args.rommon_vars.is_empty() {
+        let vars: Vec<(String, String)> = args
+            .rommon_vars
+            .iter()
+            .map(|a| a.split_once('=').map(|(n, v)| (n.to_string(), v.to_string())).ok_or(format!("--rommon-var {a}: expected NAME=VALUE")))
+            .collect::<Result<_, _>>()?;
+        nvram_config::set_rommon_vars(nvram.bytes_mut(), &vars)?;
+    }
+    if let Some(path) = &args.startup_config {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("--startup-config {}: {e}", path.display()))?;
+        nvram_config::set_startup_config(nvram.bytes_mut(), &text)?;
+    }
+
 
     let mut machine = Machine::new(rom, &cfg, nvram);
     // Input threads (network, console) wake the emulation loop from idle sleeps.
@@ -491,4 +576,52 @@ fn parse_watch(s: &str) -> Result<(u32, u32), String> {
     let (a, l) = s.split_once(':').ok_or("expected START:LEN (hex)")?;
     let hex = |x: &str| u32::from_str_radix(x.trim_start_matches("0x"), 16).map_err(|e| e.to_string());
     Ok((hex(a)?, hex(l)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_file_becomes_options() {
+        let args = config_to_args(
+            r#"
+            # a 1760 booting IOS
+            model = "1760"
+            ram = 128
+            cpu = "jit"
+            stats = true
+            trace = false
+            flash-file = ["a.bin", "b.bin"]
+            jit_threshold = 10
+            "#,
+        )
+        .unwrap();
+        // (Keys come out sorted; only the order inside an array matters.)
+        assert_eq!(
+            args,
+            ["--cpu=jit", "--flash-file=a.bin", "--flash-file=b.bin", "--jit-threshold=10", "--model=1760", "--ram=128", "--stats"]
+        );
+        assert!(config_to_args("model = { a = 1 }").is_err(), "tables are not options");
+        assert!(config_to_args("model = ").is_err(), "TOML syntax errors are reported");
+    }
+
+    /// The command line overrides the file; unknown keys are rejected.
+    #[test]
+    fn command_line_overrides_the_config_file() {
+        let file = std::env::temp_dir().join(format!("c1700emu-test-{}.toml", std::process::id()));
+        std::fs::write(&file, "model = \"1760\"\nram = 128\n").unwrap();
+        let argv = |extra: &[&str]| {
+            let mut v = vec!["c1700emu".to_string(), format!("--config={}", file.display())];
+            v.extend(extra.iter().map(|s| s.to_string()));
+            with_config_file(v).unwrap()
+        };
+        let a = Args::try_parse_from(argv(&[])).unwrap();
+        assert_eq!((a.model.as_str(), a.ram), ("1760", 128));
+        let a = Args::try_parse_from(argv(&["--ram", "64"])).unwrap();
+        assert_eq!((a.model.as_str(), a.ram), ("1760", 64));
+        std::fs::write(&file, "no-such-option = 1\n").unwrap();
+        assert!(Args::try_parse_from(argv(&[])).is_err());
+        std::fs::remove_file(&file).unwrap();
+    }
 }

@@ -92,6 +92,10 @@ pub struct Machine {
     /// (Breakpoints, tracing, profiling and `--watch` still single-step
     /// through the interpreter.)
     pub jit: Option<Box<Jit>>,
+    /// The breakpoints the JIT's translations were made for: they are hook
+    /// addresses to it (regions end before them), so it starts afresh when
+    /// the set changes.
+    jit_breakpoints: BTreeSet<u32>,
 }
 
 /// One PC sample every this many instructions. A prime, so the sampling
@@ -122,6 +126,7 @@ impl Machine {
             pace_limit: None,
             paced: false,
             jit: None,
+            jit_breakpoints: BTreeSet::new(),
         };
         m.power_on();
         m.fast_forward = FastForward::new(|a| m.board.peek_word(a));
@@ -198,14 +203,21 @@ impl Machine {
     pub fn run(&mut self, budget: u64, ignore_breakpoint_at_start: bool) -> StopReason {
         self.paced = false;
         let check_bp = !self.breakpoints.is_empty();
-        // Breakpoints, trace, profile and watch need a look at every
-        // instruction; the other hooks live at a few known addresses, so an
-        // ordinary instruction only pays for a page test (`is_hook`).
-        let slow = check_bp || self.trace || self.profile.is_some() || self.board.watch.is_some();
+        // With the JIT, breakpoints are hooks: translated code stops before
+        // them (`jit_batch`), so debugging keeps the JIT's speed (docs ch. 7.3).
+        let bp_hooks = check_bp && self.jit.is_some();
+        if self.jit.is_some() && self.breakpoints != self.jit_breakpoints {
+            self.flush_jit();
+            self.jit_breakpoints = self.breakpoints.clone();
+        }
+        // Breakpoints (interpreter), trace, profile and watch need a look at
+        // every instruction; the other hooks live at a few known addresses,
+        // so an ordinary instruction only pays for a page test (`is_hook`).
+        let slow = (check_bp && !bp_hooks) || self.trace || self.profile.is_some() || self.board.watch.is_some();
         let mut done = 0;
         while done < budget {
             let pc = self.cpu.pc;
-            if slow || is_hook(&self.fast_forward, &self.idle, pc) {
+            if slow || is_hook(&self.fast_forward, &self.idle, pc) || (bp_hooks && self.breakpoints.contains(&pc)) {
                 // One instruction at a time, with the per-address hooks.
                 match self.before_step(pc, check_bp && !(done == 0 && ignore_breakpoint_at_start)) {
                     Hook::Run => {}
@@ -256,9 +268,9 @@ impl Machine {
     /// interpreter 4% slower even when not used (measured).
     #[inline(never)]
     fn jit_batch(&mut self, max: u64) -> (u64, BatchEnd) {
-        let (ff, idle) = (&self.fast_forward, &self.idle);
+        let (ff, idle, bps) = (&self.fast_forward, &self.idle, &self.breakpoints);
         let jit = self.jit.as_mut().expect("JIT engine selected");
-        jit.run_batch(&mut self.cpu, &mut self.board, max, |pc| is_hook(ff, idle, pc))
+        jit.run_batch(&mut self.cpu, &mut self.board, max, |pc| is_hook(ff, idle, pc) || (!bps.is_empty() && bps.contains(&pc)))
     }
 
     /// The per-instruction hooks, run before executing the instruction at `pc`.
