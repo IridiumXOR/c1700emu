@@ -20,6 +20,7 @@
 //!   ([`Platform::watch_code`]); the translations covering a written word
 //!   are dropped and retranslated when needed.
 
+mod check;
 mod codegen;
 mod runtime;
 mod scan;
@@ -142,6 +143,8 @@ pub struct JitStats {
     pub exceptions: u64,
     /// Blocks that stopped early (interrupt raised, code written...).
     pub early_exits: u64,
+    /// Region runs verified against the interpreter (`--cpu jit-check`).
+    pub checked_runs: u64,
     pub invalidated_blocks: u64,
     pub flushes: u64,
     /// Untranslatable first instructions, by instruction word.
@@ -180,6 +183,8 @@ pub struct Jit {
     /// dropped). A region is one function, so it is dropped as a whole.
     regions: Vec<Option<Vec<u64>>>,
     threshold: u32,
+    /// Lockstep checking: verify every region run with the interpreter.
+    check: bool,
     pub stats: JitStats,
 }
 
@@ -204,6 +209,7 @@ impl Jit {
             lines: HashMap::new(),
             regions: Vec::new(),
             threshold: threshold.max(1),
+            check: false,
             stats: JitStats::default(),
         }
     }
@@ -288,7 +294,7 @@ impl Jit {
 
             let (k, end) = match action {
                 Action::Run(t) => {
-                    let (k, end) = self.run_translated(cpu, sys, t, room);
+                    let (k, end) = if self.check { self.run_checked(cpu, sys, t, room, pc, pa) } else { self.run_translated(cpu, sys, t, room) };
                     n += k;
                     if end == BatchEnd::Checkstop {
                         return (n, end);
@@ -318,6 +324,16 @@ impl Jit {
             self.sync(cpu, sys);
         }
         (n, BatchEnd::Budget)
+    }
+
+    /// Lockstep checking (`--cpu jit-check`, docs ch. 17.13): every region
+    /// run is replayed by the interpreter and compared; a difference stops
+    /// the emulator with a report. Much slower; for verification.
+    pub fn set_check(&mut self, on: bool) {
+        self.check = on;
+        // Every access must go through the helpers to be recorded.
+        self.ctx.fill = !on;
+        self.ctx.tables.flush_all();
     }
 
     /// Throw every translation away (the machine was reset, or memory was
@@ -376,6 +392,32 @@ impl Jit {
             self.stats.early_exits += 1;
         }
         (steps, BatchEnd::Budget)
+    }
+
+    /// [`Jit::run_translated`] verified against the interpreter (see `check`).
+    fn run_checked<P: Platform>(&mut self, cpu: &mut Cpu, sys: &mut P, t: Translated, room: u64, pc: u32, pa: u32) -> (u64, BatchEnd) {
+        let before = cpu.arch_state();
+        let code = check::CodePage::capture(sys, pa);
+        let irq0 = sys.external_interrupt();
+        let mut rec = check::Recorder { inner: sys, log: Vec::new() };
+        self.ctx.helpers = Helpers::new::<check::Recorder<P>>();
+        let (steps, end) = self.run_translated(cpu, &mut rec, t, room);
+        let log = std::mem::take(&mut rec.log);
+        self.ctx.helpers = Helpers::new::<P>();
+        let jit_state = cpu.arch_state();
+        match check::replay(cpu, sys, &code, &before, &log, irq0, steps) {
+            Ok(interp_state) if interp_state == jit_state => {}
+            Ok(interp_state) => panic!(
+                "JIT check failed: region at {pc:#010x}, {steps} instructions: interpreter vs JIT:{}",
+                check::diff(&interp_state, &jit_state)
+            ),
+            Err(e) => panic!("JIT check failed: region at {pc:#010x}, {steps} instructions: {e}"),
+        }
+        // Keep the JIT's result (equal to the interpreter's, but the MMU and
+        // devices already saw the JIT's run).
+        cpu.set_arch_state(&jit_state);
+        self.stats.checked_runs += 1;
+        (steps, end)
     }
 
     /// Interpret one instruction, or (`one` = false) up to the next change
@@ -548,6 +590,9 @@ impl Jit {
             pct(s.unwatched),
         );
         out += &format!("  {} exceptions inside blocks, {} early exits, {} interrupt/ITLB entries\r\n", s.exceptions, s.early_exits, s.entries);
+        if s.checked_runs > 0 {
+            out += &format!("  lockstep check: {} region runs verified against the interpreter, all identical\r\n", s.checked_runs);
+        }
         let mut by_op: HashMap<String, u64> = HashMap::new();
         for (&word, &n) in &s.stop_words {
             let name = Ins::new(word, Extensions::none()).simplified().to_string();

@@ -257,6 +257,32 @@ pub enum StepOutcome {
     Checkstop,
 }
 
+/// The part of the CPU state that instructions change, cheap to copy and
+/// compare (the JIT's lockstep checker, docs ch. 17.13): registers, the
+/// clock, the reservation and the exception counters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchState {
+    pub gpr: [u32; 32],
+    pub pc: u32,
+    pub cr: u32,
+    pub xer: u32,
+    pub lr: u32,
+    pub ctr: u32,
+    pub msr: u32,
+    pub srr0: u32,
+    pub srr1: u32,
+    pub dar: u32,
+    pub dsisr: u32,
+    pub sprg: [u32; 4],
+    pub tb: u64,
+    pub dec: u32,
+    pub dec_pending: bool,
+    pub cycles: u64,
+    pub tb_prescaler: u32,
+    pub reservation: Option<u32>,
+    pub exception_counts: [u64; 32],
+}
+
 /// Architectural state of the MPC8xx core.
 #[derive(Clone)]
 pub struct Cpu {
@@ -529,6 +555,52 @@ impl Cpu {
         let div = self.tb_divider as u64;
         let first_tick = div.saturating_sub(self.tb_prescaler as u64).max(1); // instructions until the next tick
         first_tick + self.dec as u64 * div // the (dec+1)-th tick takes DEC from 0 to -1
+    }
+
+    pub fn arch_state(&self) -> ArchState {
+        ArchState {
+            gpr: self.gpr,
+            pc: self.pc,
+            cr: self.cr,
+            xer: self.xer,
+            lr: self.lr,
+            ctr: self.ctr,
+            msr: self.msr,
+            srr0: self.srr0,
+            srr1: self.srr1,
+            dar: self.dar,
+            dsisr: self.dsisr,
+            sprg: self.sprg,
+            tb: self.tb,
+            dec: self.dec,
+            dec_pending: self.dec_pending,
+            cycles: self.cycles,
+            tb_prescaler: self.tb_prescaler,
+            reservation: self.reservation,
+            exception_counts: self.exception_counts,
+        }
+    }
+
+    pub fn set_arch_state(&mut self, s: &ArchState) {
+        self.gpr = s.gpr;
+        self.pc = s.pc;
+        self.cr = s.cr;
+        self.xer = s.xer;
+        self.lr = s.lr;
+        self.ctr = s.ctr;
+        self.msr = s.msr;
+        self.srr0 = s.srr0;
+        self.srr1 = s.srr1;
+        self.dar = s.dar;
+        self.dsisr = s.dsisr;
+        self.sprg = s.sprg;
+        self.tb = s.tb;
+        self.dec = s.dec;
+        self.dec_pending = s.dec_pending;
+        self.cycles = s.cycles;
+        self.tb_prescaler = s.tb_prescaler;
+        self.reservation = s.reservation;
+        self.exception_counts = s.exception_counts;
     }
 
     /// Snapshot state (docs ch. 20): every architectural register, the

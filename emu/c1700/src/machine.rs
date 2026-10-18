@@ -27,6 +27,9 @@ pub enum CpuEngine {
     Interp,
     /// The JIT: hot code translated to host machine code (docs ch. 17).
     Jit,
+    /// The JIT, every region run verified against the interpreter
+    /// (lockstep, much slower; docs ch. 17.13).
+    JitCheck,
 }
 
 /// What [`Machine::run`] does after the per-address hooks.
@@ -142,7 +145,11 @@ impl Machine {
 
     /// Select the CPU engine.
     pub fn set_engine(&mut self, engine: CpuEngine, jit_threshold: u32) {
-        self.jit = (engine == CpuEngine::Jit).then(|| Box::new(Jit::with_threshold(jit_threshold)));
+        self.jit = (engine != CpuEngine::Interp).then(|| {
+            let mut jit = Box::new(Jit::with_threshold(jit_threshold));
+            jit.set_check(engine == CpuEngine::JitCheck);
+            jit
+        });
     }
 
     /// The CPU state was replaced: translations made for the old one go.

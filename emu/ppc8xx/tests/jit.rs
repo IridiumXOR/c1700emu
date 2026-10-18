@@ -78,12 +78,19 @@ fn both(program: &[&str], init: impl Fn(&mut Cpu, &mut TestBoard), steps: u64) -
     let mut reference = fresh();
     run_engine(&mut reference.0, &mut reference.1, None, steps);
     let mut last = None;
-    for threshold in [3, 1] {
+    // threshold 3, threshold 1, and threshold 1 with every region run
+    // verified against the interpreter (lockstep check, which panics on
+    // any difference)
+    for (threshold, check) in [(3, false), (1, true), (1, false)] {
         let (mut cpu, mut board) = fresh();
         let mut jit = Jit::with_threshold(threshold);
+        jit.set_check(check);
         run_engine(&mut cpu, &mut board, Some(&mut jit), steps);
         let run = (cpu, board);
-        assert_same(&reference, &run, &format!("threshold {threshold}"));
+        assert_same(&reference, &run, &format!("threshold {threshold}, check {check}"));
+        if check {
+            assert!(jit.stats.checked_runs > 0, "the checker ran");
+        }
         last = Some((run.0, run.1, jit));
     }
     let last = last.unwrap();

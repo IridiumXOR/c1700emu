@@ -466,7 +466,40 @@ dispatcher ~14%, reading the IOS image out of flash through the device
 path ~10%, the interpreter for the rest (tails, cold code, untranslatable
 instructions).
 
-## 17.12 What limits it, and next steps
+## 17.13 Lockstep checking: `--cpu jit-check`
+
+The tests compare the JIT with the interpreter on chosen programs. To
+verify it on everything IOS does, `--cpu jit-check` checks **every region
+run** against the interpreter while the machine runs (`jit/check.rs`):
+
+1. the region runs on the real platform through a **recorder**, with the
+   fast memory tables off, so every memory access goes through the helpers
+   and is logged with its value (and the interrupt line after it);
+2. the CPU is put back in its state before the region (`Cpu::arch_state`),
+   and the **interpreter** executes the same number of steps against a
+   **replayer**: reads are answered from the log, writes are compared
+   with it, so the devices never see an access twice; instruction fetches
+   come from a copy of the region's page taken before it ran (a region
+   can rewrite its own code);
+3. registers, clock, reservation and exception counts must be identical
+   and the log fully consumed, otherwise the emulator stops:
+
+   ```
+   JIT check failed: region at 0x00001000, 7 instructions: interpreter vs JIT: r3: 0x00000002 vs 0x00000001;
+   ```
+
+   (That one is real output, from the checker's own first version: it
+   replayed fetches from memory the region had already rewritten. The fix
+   is the page copy of step 2.)
+
+`read_spr` queries (does the platform implement this SPR? only IMMR on
+this board) are not logged: the interpreter asks for every `mfspr`, the
+JIT only for helper ones, and the answer has no side effects.
+
+The ten JIT tests also run in check mode, and the exact ROMMON boot test
+boots with `--cpu jit-check` too. A whole IOS boot: CHECK_RESULT.
+
+## 17.14 What limits it, and next steps
 
 * **Flash reads.** ROMMON copies the 21 MB image out of flash through the
   flash device model. Reading flash directly while it is in read-array
@@ -481,6 +514,3 @@ instructions).
 * **Region boundaries**: execution passes between regions through the
   dispatcher; jumping straight from one region into another (chaining)
   would remove that cost.
-* A **lockstep checking mode** (`--cpu jit-check`: every region run by both
-  engines, compared) would let the full IOS boot verify the JIT, not only
-  the tests.

@@ -113,6 +113,11 @@ fn jit_boots_rommon_exactly_like_the_interpreter() {
         (n, m.cpu.cycles, m.cpu.tb, m.cpu.gpr, m.cpu.cr, m.cpu.msr, String::from_utf8_lossy(&out).into_owned(), m.board.dram[0].clone(), report)
     };
     let interp = boot(CpuEngine::Interp, None);
+    // The lockstep checker verifies every region run on the way (it panics
+    // on a difference), and must not change the outcome either.
+    let checked = boot(CpuEngine::JitCheck, Some(interp.0));
+    assert!(checked.8.contains("lockstep check"), "{}", checked.8);
+    assert_eq!((checked.1, checked.6.clone()), (interp.1, interp.6.clone()), "jit-check: virtual time and console");
     let jit = boot(CpuEngine::Jit, Some(interp.0));
     eprintln!("{}", jit.8);
     assert_eq!(jit.1, interp.1, "virtual time");

@@ -24,7 +24,7 @@ Chapter references are to `docs/`.
       bare RETURN); `--idle warp` is back; a snapshot/idle-detection bug
       found on the way is fixed (chapter 21, tools/tests/warp_test.py).
 
-## JIT (chapter 17.12)
+## JIT (chapter 17.14)
 
 - [ ] 8. Read flash directly (ROMMON's copy of the 21 MB image is ~10% of
       the benchmark); needs cheap invalidation when the flash leaves
@@ -34,8 +34,9 @@ Chapter references are to `docs/`.
 - [ ] 10. Keep guest registers in host registers instead of writing every
       change through to the `Cpu` struct.
 - [ ] 11. Jump directly between regions instead of through the dispatcher.
-- [ ] 12. `--cpu jit-check`: run every region on both engines and compare,
-      so a full IOS boot verifies the JIT.
+- [x] 12. `--cpu jit-check`: every region run verified against the interpreter
+      (record + replay), chapter 17.13; all JIT tests and the ROMMON boot
+      run in check mode too.
 - [ ] 13. The interpreter is ~2% slower with the JIT built in, even unused
       (mostly code layout; 2% unexplained, chapter 17.9).
 
