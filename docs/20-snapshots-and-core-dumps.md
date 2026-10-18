@@ -85,6 +85,10 @@ The file (`c1700/src/snapshot.rs`) is a 16-byte header (magic
 little-endian, through an lz4 frame (crate `lz4_flex`). Most of the 128 MB
 of RAM compresses away; saving and loading run at memory speed.
 
+The format version changes whenever the walk does, and a snapshot of
+another version is refused with a message (re-take it): version 2 added
+the machine's device-sync horizon (chapter 17.16).
+
 **Test** (`c1700/tests/boot.rs::snapshot_restore_continues_identically`):
 take a snapshot of the ROM boot right after the banner, let the original
 continue to the prompt and answer a typed `confreg`, restore the snapshot
