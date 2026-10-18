@@ -22,6 +22,7 @@ mod decode_cache;
 mod execute;
 pub mod jit;
 pub mod mmu;
+pub mod state;
 
 use decode_cache::DecodeCache;
 use mmu::{Access, Fault, Mmu};
@@ -528,6 +529,34 @@ impl Cpu {
         let div = self.tb_divider as u64;
         let first_tick = div.saturating_sub(self.tb_prescaler as u64).max(1); // instructions until the next tick
         first_tick + self.dec as u64 * div // the (dec+1)-th tick takes DEC from 0 to -1
+    }
+
+    /// Snapshot state (docs ch. 20): every architectural register, the
+    /// clock and the MMU. (The decode cache is keyed by instruction word,
+    /// so it stays valid whatever the memory holds.)
+    pub fn visit_state(&mut self, v: &mut dyn state::Visitor) {
+        state::u32s(v, &mut self.gpr);
+        for x in [&mut self.pc, &mut self.cr, &mut self.xer, &mut self.lr, &mut self.ctr, &mut self.msr] {
+            v.u32(x);
+        }
+        for x in [&mut self.srr0, &mut self.srr1, &mut self.dar, &mut self.dsisr] {
+            v.u32(x);
+        }
+        state::u32s(v, &mut self.sprg);
+        v.u64(&mut self.tb);
+        for x in [&mut self.dec, &mut self.pvr, &mut self.ic_cst, &mut self.dc_cst] {
+            v.u32(x);
+        }
+        state::u32s(v, &mut self.spr_misc[..]);
+        state::opt_u32(v, &mut self.reservation);
+        v.u64(&mut self.cycles);
+        v.u32(&mut self.tb_divider);
+        v.bool(&mut self.tb_enabled);
+        v.u32(&mut self.tb_prescaler);
+        v.bool(&mut self.dec_pending);
+        self.mmu.visit_state(v);
+        state::u64s(v, &mut self.exception_counts);
+        state::vec_u32(v, &mut self.soft_emulation_pcs);
     }
 
     /// Exception entry, as described in MPC860UM chapter 6:

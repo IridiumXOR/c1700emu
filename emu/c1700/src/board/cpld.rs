@@ -39,6 +39,13 @@ const REG_BOARD_ID: usize = 0x04;
 const REG_FPGA_CONFIG: usize = 0x4C;
 
 impl Cpld {
+    /// Snapshot state (docs ch. 20). Access counters aren't state.
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        v.bytes_fixed(&mut self.regs);
+        v.u8(&mut self.board_id);
+        self.fpga.visit_state(v);
+    }
+
     pub fn new(board_id: u8) -> Self {
         let mut c = Cpld {
             regs: [0; 256],

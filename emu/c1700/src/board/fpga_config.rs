@@ -63,6 +63,28 @@ pub struct FpgaConfigPort {
 }
 
 impl FpgaConfigPort {
+    /// Snapshot state (docs ch. 20).
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        use ppc8xx::state;
+        v.u8(&mut self.latch);
+        v.bool(&mut self.done);
+        v.bool(&mut self.synced);
+        v.u32(&mut self.shift);
+        v.u32(&mut self.word_bits);
+        let (mut data, mut reg, mut left) = match self.packet {
+            Packet::Header => (false, 0, 0),
+            Packet::Data { reg, left } => (true, reg, left),
+        };
+        v.bool(&mut data);
+        v.u32(&mut reg);
+        v.u32(&mut left);
+        self.packet = if data { Packet::Data { reg, left } } else { Packet::Header };
+        v.u32(&mut self.last_reg);
+        v.u64(&mut self.bits_since_prog);
+        v.u64(&mut self.frame_words);
+        state::opt_u32(v, &mut self.flr);
+    }
+
     pub fn new() -> Self {
         FpgaConfigPort {
             latch: 0,

@@ -56,6 +56,19 @@ pub struct Uart16550 {
 }
 
 impl Uart16550 {
+    /// Snapshot state (docs ch. 20). Bytes already sent (`tx`) belong to
+    /// the console, not to the device.
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        let mut rx: Vec<u8> = self.rx.iter().copied().collect();
+        v.bytes(&mut rx);
+        self.rx = rx.into();
+        for x in [&mut self.ier, &mut self.fcr, &mut self.lcr, &mut self.mcr, &mut self.scr, &mut self.dll, &mut self.dlm, &mut self.lsr_errors] {
+            v.u8(x);
+        }
+        v.bool(&mut self.thre_irq);
+        v.u32(&mut self.idle_polls);
+    }
+
     pub fn new() -> Self {
         Uart16550 {
             rx: VecDeque::new(),

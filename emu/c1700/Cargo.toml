@@ -21,3 +21,4 @@ smoltcp = { version = "0.14", default-features = false, features = ["std", "medi
 crc32fast = "1.5.2"
 tftp-packet = "0.1"
 tun-tap = { version = "0.1.4", default-features = false }
+lz4_flex = "0.14.0"

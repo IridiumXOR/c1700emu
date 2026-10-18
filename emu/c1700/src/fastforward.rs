@@ -93,6 +93,13 @@ pub struct FastForward {
 }
 
 impl FastForward {
+    /// Snapshot state (docs ch. 20): only statistics; what is enabled
+    /// comes from the command line.
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        v.u64(&mut self.skipped_ticks);
+        v.u64(&mut self.bulk_cleared);
+    }
+
     /// Enable the hooks if `peek` shows the expected instructions at every loop.
     pub fn new(mut peek: impl FnMut(u32) -> Option<u32>) -> Self {
         let matches = LOOPS.iter().all(|l| {

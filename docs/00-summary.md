@@ -26,6 +26,7 @@ chapter with the full story.
 | IOS networking: ARP + `ping 10.0.2.2` from IOS to the virtual host | ✅ `.!!!!` ([chapter 13](13-ios-networking.md)): FEC + IDMA + MMU |
 | Idle detection + interpreter fast paths: idle router ~0% host CPU, interpreter +47% | ✅ IOS boot to `Router>` 318 → 153 s ([chapters 15](15-profiling-and-idle.md), [16](16-interpreter-optimisations.md)) |
 | 8xx MMU (ITLB/DTLB, table-walk assist, protection, TLB exceptions) | ✅ IOS boots with translation on ([chapter 12](12-mmu.md)) |
+| Snapshots (`Ctrl-] s`, `--restore`) and ELF core dumps (`Ctrl-] d`) | ✅ IOS at `Router#` 0.3 s after start instead of ~150 s ([chapter 20](20-snapshots-and-core-dumps.md)) |
 | JIT compiler as a second CPU engine (`--cpu jit`, Cranelift) | ✅ ~9.8× the interpreter on the benchmark, CPU-bound IOS boot 217.8 → 38.4 s, same results ([chapter 17](17-jit.md)) |
 | Network bridge to the real LAN | ✅ TAP devices and UDP tunnels (`--net`); two emulated routers ping each other ([chapter 18](18-real-networks.md)) |
 

@@ -20,6 +20,7 @@
 
 pub mod board;
 pub mod console;
+pub mod coredump;
 pub mod emulator;
 pub mod fastforward;
 pub mod gdb;
@@ -27,3 +28,4 @@ pub mod idle;
 pub mod machine;
 pub mod mpc860;
 pub mod net;
+pub mod snapshot;

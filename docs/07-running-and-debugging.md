@@ -37,6 +37,8 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--no-fast-forward` | execute the ROM's delay loops instead of skipping them |
 | `--net virtual\|none\|tap:NAME\|udp:LPORT:RHOST:RPORT` | what the Ethernet port is plugged into (chapter 18; creating a TAP device and bridging it: 18.2) |
 | `--mac XX:XX:XX:XX:XX:XX` | MAC address written into the NVRAM cookie |
+| `--restore FILE` | start from a snapshot instead of power-on (chapter 20) |
+| `--snapshot FILE` / `--core FILE` | where `Ctrl-] s` saves a snapshot and `Ctrl-] d` an ELF core dump (defaults `c1700.snap`, `c1700-core.elf`) |
 | `--cpu interp\|jit` | CPU engine: the interpreter (default, the reference) or the JIT (chapter 17) |
 | `--jit-threshold N` | JIT: times a block runs interpreted before it is translated (default 50) |
 | `--ram MB` | SDRAM size, split into power-of-two banks (default 32) |
@@ -62,6 +64,8 @@ emulated 16550.
 
 * `Ctrl-]` then `q` — quit (NVRAM is saved)
 * `Ctrl-]` then `b` — send a serial BREAK
+* `Ctrl-]` then `s` — save a snapshot of the whole machine (`--snapshot`, chapter 20)
+* `Ctrl-]` then `d` — write an ELF core dump: memory and registers for GDB (`--core`, chapter 20)
 * `Ctrl-]` twice — send a literal `Ctrl-]`
 
 With `--tcp 2323`: `telnet localhost 2323`. In telnet, `Ctrl-]` then

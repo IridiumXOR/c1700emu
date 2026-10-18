@@ -642,6 +642,45 @@ impl Mmu {
         true
     }
 
+    /// Snapshot state (docs ch. 20). The fast caches aren't state: flushed.
+    pub fn visit_state(&mut self, v: &mut dyn crate::state::Visitor) {
+        for tlb in [&mut self.itlb, &mut self.dtlb] {
+            for e in tlb.entries.iter_mut() {
+                v.bool(&mut e.present);
+                for x in [&mut e.epn, &mut e.asid, &mut e.page_mask, &mut e.rpn, &mut e.twc, &mut e.pte] {
+                    v.u32(x);
+                }
+            }
+            for x in [&mut tlb.ctr, &mut tlb.epn, &mut tlb.twc, &mut tlb.rpn, &mut tlb.ap] {
+                v.u32(x);
+            }
+            crate::state::u32s(v, &mut tlb.debug);
+            tlb.fast.flush();
+        }
+        for x in [&mut self.m_twb, &mut self.m_casid, &mut self.m_tw] {
+            v.u32(x);
+        }
+        for x in [&mut self.itlb_misses, &mut self.dtlb_misses, &mut self.tlb_errors] {
+            v.u64(x);
+        }
+    }
+
+    /// The valid translations in both TLBs as `(effective, physical, size)`
+    /// (for core dumps: memory at the addresses the guest uses).
+    pub fn mappings(&self) -> Vec<(u32, u32, u32)> {
+        let mut out: Vec<(u32, u32, u32)> = Vec::new();
+        for tlb in [&self.itlb, &self.dtlb] {
+            for e in tlb.entries.iter().filter(|e| e.present && e.twc & TWC_V != 0 && e.pte & RPN_V != 0) {
+                let m = (e.epn, e.rpn, (!e.page_mask).wrapping_add(1));
+                if !out.contains(&m) {
+                    out.push(m);
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     /// Number of valid entries in the (instruction, data) TLBs, for `--stats`.
     pub fn occupancy(&self) -> (usize, usize) {
         let count = |t: &Tlb| t.entries.iter().filter(|e| e.present).count();

@@ -123,6 +123,23 @@ impl Machine {
         self.sync_devices();
     }
 
+    /// The whole machine's state, for snapshots (docs ch. 20): the CPU,
+    /// the board, and the emulator's own bookkeeping that affects what
+    /// happens next (cycles not yet given to the devices, the idle
+    /// detector). Breakpoints, profiles and the engine choice stay as
+    /// configured; the JIT starts afresh.
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        self.cpu.visit_state(v);
+        self.board.visit_state(v);
+        v.u64(&mut self.unsynced);
+        v.u32(&mut self.resets);
+        self.idle.visit_state(v);
+        self.fast_forward.visit_state(v);
+        if v.loading() {
+            self.flush_jit();
+        }
+    }
+
     /// Select the CPU engine.
     pub fn set_engine(&mut self, engine: CpuEngine, jit_threshold: u32) {
         self.jit = (engine == CpuEngine::Jit).then(|| Box::new(Jit::with_threshold(jit_threshold)));

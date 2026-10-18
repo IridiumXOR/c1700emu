@@ -99,6 +99,20 @@ struct Args {
     #[arg(long)]
     no_net: bool,
 
+    /// Restore the machine from this snapshot before running (taken with
+    /// the same --model, --ram and boot ROM). See docs ch. 20.
+    #[arg(long)]
+    restore: Option<PathBuf>,
+
+    /// Where `Ctrl-] s` saves a snapshot.
+    #[arg(long, default_value = "c1700.snap")]
+    snapshot: PathBuf,
+
+    /// Where `Ctrl-] d` writes an ELF core dump (memory and registers, for
+    /// GDB: `gdb -ex "core-file FILE"`).
+    #[arg(long, default_value = "c1700-core.elf")]
+    core: PathBuf,
+
     /// What the Ethernet port is plugged into: `virtual` (the built-in host
     /// 10.0.2.2 with ping and TFTP; default), `none`, `tap:NAME` (an
     /// existing Linux TAP device, e.g. bridged to the LAN) or
@@ -336,9 +350,16 @@ fn main() -> Result<(), String> {
     if let Some((start, len)) = args.watch {
         machine.board.watch = Some(c1700emu::board::Watch { start, end: start.wrapping_add(len), pc: u32::MAX });
     }
+    if let Some(path) = &args.restore {
+        let start = std::time::Instant::now();
+        machine.load_snapshot(path)?;
+        log::info!("restored {} in {:.2} s: pc={:#010x}, {} instructions", path.display(), start.elapsed().as_secs_f64(), machine.cpu.pc, machine.cpu.cycles);
+    }
     let console = Console::new(!args.no_stdio, args.tcp).map_err(|e| format!("console: {e}"))?;
     let aux = args.aux_tcp.map(Console::aux).transpose().map_err(|e| format!("AUX port: {e}"))?;
     let mut emu = Emulator::new(machine, console, aux);
+    emu.snapshot_path = args.snapshot.clone();
+    emu.core_path = args.core.clone();
 
     if let Some(port) = args.gdb {
         emu = gdb::serve(emu, port)?;

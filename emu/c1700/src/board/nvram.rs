@@ -25,6 +25,20 @@ pub struct Nvram {
 }
 
 impl Nvram {
+    /// Size in bytes.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Snapshot state (docs ch. 20). Restored contents are written back to
+    /// the NVRAM file at exit, like guest writes.
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        v.bytes_fixed(&mut self.data);
+        if v.loading() {
+            self.dirty = true;
+        }
+    }
+
     /// Create an NVRAM of `size` bytes, loading `path` if it exists.
     /// A blank EEPROM reads all ones.
     pub fn new(size: usize, path: Option<PathBuf>) -> std::io::Result<Self> {

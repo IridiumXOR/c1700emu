@@ -79,6 +79,20 @@ pub struct Fec {
 }
 
 impl Fec {
+    /// Snapshot state (docs ch. 20).
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        use ppc8xx::state;
+        for x in [&mut self.ecntrl, &mut self.ievent, &mut self.imask, &mut self.ivec, &mut self.mii_data] {
+            v.u32(x);
+        }
+        state::u16s(v, &mut self.phy.regs);
+        v.bool(&mut self.rx_active);
+        v.bool(&mut self.tx_active);
+        state::opt_u32(v, &mut self.rx_cursor);
+        state::opt_u32(v, &mut self.tx_cursor);
+        v.bytes(&mut self.tx_partial);
+    }
+
     pub fn new() -> Self {
         Fec {
             ecntrl: 0,

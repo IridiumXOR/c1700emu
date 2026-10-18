@@ -43,6 +43,14 @@ pub struct IoBus {
 }
 
 impl IoBus {
+    /// Snapshot state (docs ch. 20).
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        self.nvram.visit_state(v);
+        self.cpld.visit_state(v);
+        self.uart.visit_state(v);
+        self.aux.visit_state(v);
+    }
+
     pub fn new(nvram: Nvram, board_id: u8) -> Self {
         IoBus {
             nvram,

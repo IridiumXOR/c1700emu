@@ -17,8 +17,8 @@ Chapter references are to `docs/`.
 - [x] 4. The 5 boot-time machine checks: deliberate probes past the end
       of RAM and flash, faithful (chapter 19.3).
 - [ ] 5. `--aux-tcp` (AUX port over telnet) never tested with IOS.
-- [ ] 6. **Snapshots**: save the machine at `Router>`, restore in seconds
-      (first item of chapter 14's plan, never done; biggest usability win).
+- [x] 6. Snapshots (`Ctrl-] s`, `--restore`; IOS at `Router#` in 0.3 s)
+      and ELF core dumps for GDB (`Ctrl-] d`), chapter 20.
 - [ ] 7. Warp idle mode made IOS's console go silent and was removed; cause
       unknown (chapter 15.5).
 

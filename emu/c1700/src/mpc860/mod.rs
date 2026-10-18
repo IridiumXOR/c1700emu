@@ -131,6 +131,28 @@ const SCCR_RTSEL: u32 = 0x0080_0000; // source = EXTCLK (else the 32 kHz oscilla
 const CYCLES_PER_OSC32K: u64 = 48_000_000 / 32_768;
 
 impl Mpc860 {
+    /// Snapshot state (docs ch. 20). Register statistics aren't state.
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        use ppc8xx::state;
+        v.u32(&mut self.immr);
+        v.bytes_fixed(&mut self.mem[..]);
+        for bank in self.upm.iter_mut() {
+            state::u32s(v, bank);
+        }
+        v.u64(&mut self.map_epoch);
+        v.u16(&mut self.pit.count);
+        v.u64(&mut self.pit.acc);
+        v.u8(&mut self.irq_pins);
+        v.u32(&mut self.irq_edge_latched);
+        self.fec.visit_state(v);
+        v.bool(&mut self.spi_start);
+        let mut cmd = self.cpm_command.map_or(0u32, |(op, ch)| 0x1_0000 | (op as u32) << 8 | ch as u32);
+        v.u32(&mut cmd);
+        self.cpm_command = (cmd & 0x1_0000 != 0).then_some(((cmd >> 8) as u8, cmd as u8));
+        // The memory map may differ from what the board decoded: rebuild it.
+        self.map_changed();
+    }
+
     pub fn new() -> Self {
         let mut m = Mpc860 {
             immr: 0,

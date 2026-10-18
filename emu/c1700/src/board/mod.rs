@@ -158,6 +158,67 @@ impl Board {
         }
     }
 
+    /// Physical memory for a core dump (docs ch. 20): every run of
+    /// consecutive pages decoded as RAM, ROM, flash, IMMR (registers and
+    /// DPRAM) or the NVRAM, as (address, contents). Devices with read side
+    /// effects are left out.
+    pub fn physical_segments(&mut self) -> Vec<(u32, Vec<u8>)> {
+        let mut segments: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut addr: u64 = 0;
+        while addr < 1 << 32 {
+            let page = addr as u32;
+            let data: Option<Vec<u8>> = match self.region(page) {
+                Region::Dram { bank, base } => Some(self.dram[bank as usize][base as usize..(base + PAGE_SIZE) as usize].to_vec()),
+                Region::Rom { base } => Some(self.rom[base as usize..(base + PAGE_SIZE).min(self.rom.len() as u32) as usize].to_vec()),
+                Region::Flash { base } => Some(self.flash.bytes()[base as usize..(base + PAGE_SIZE).min(self.flash.size()) as usize].to_vec()),
+                Region::Immr => Some((0..PAGE_SIZE).map(|o| self.peek8(page + o).unwrap_or(0)).collect()),
+                Region::IoBus { base } if base < self.io.nvram.len() as u32 => {
+                    Some((0..self.io.nvram.len() as u32).map(|o| self.io.peek8(base + o)).collect())
+                }
+                _ => None,
+            };
+            if let Some(data) = data {
+                match segments.last_mut() {
+                    Some((start, bytes)) if *start as u64 + bytes.len() as u64 == addr => bytes.extend_from_slice(&data),
+                    _ => segments.push((page, data)),
+                }
+            }
+            addr += PAGE_SIZE as u64;
+        }
+        segments
+    }
+
+    /// Snapshot state (docs ch. 20): RAM, flash, NVRAM and every device.
+    /// Not state: the ROM (checked by the snapshot header), the address
+    /// decoding table (rebuilt), the network attachment (kept as
+    /// configured), translated-code watches (the JIT is flushed).
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        self.mpc.visit_state(v);
+        for bank in self.dram.iter_mut() {
+            let mut len = bank.len() as u64;
+            v.u64(&mut len);
+            if len != bank.len() as u64 {
+                return v.fail(format!("snapshot has a {} MB RAM bank where this machine has {} MB (use the same --ram)", len >> 20, bank.len() >> 20));
+            }
+            v.bytes_fixed(bank);
+        }
+        let mut flash_size = self.flash.size();
+        v.u32(&mut flash_size);
+        if flash_size != self.flash.size() {
+            return v.fail(format!("snapshot has {} MB of flash, this machine {} MB (use the same --flash-size/--model)", flash_size >> 20, self.flash.size() >> 20));
+        }
+        self.flash.visit_state(v);
+        self.io.visit_state(v);
+        v.bool(&mut self.irq_line);
+        v.u64(&mut self.now_cycles);
+        v.u64(&mut self.last_net_poll);
+        v.bool(&mut self.idma_busy);
+        if v.loading() {
+            self.invalidate_map();
+            self.code.clear();
+        }
+    }
+
     /// Power-on reset of the whole board (RAM content is lost).
     pub fn power_on_reset(&mut self) {
         self.mpc.power_on_reset();

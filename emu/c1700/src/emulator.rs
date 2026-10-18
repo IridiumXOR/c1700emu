@@ -24,6 +24,9 @@ pub struct Emulator {
     pending_aux_input: VecDeque<u8>,
     pub quit: bool,
     last_flush: Instant,
+    /// Where `Ctrl-] s` saves a snapshot and `Ctrl-] d` a core dump.
+    pub snapshot_path: std::path::PathBuf,
+    pub core_path: std::path::PathBuf,
 }
 
 impl Emulator {
@@ -36,6 +39,8 @@ impl Emulator {
             pending_aux_input: VecDeque::new(),
             quit: false,
             last_flush: Instant::now(),
+            snapshot_path: "c1700.snap".into(),
+            core_path: "c1700-core.elf".into(),
         }
     }
 
@@ -51,6 +56,8 @@ impl Emulator {
                 ConsoleEvent::Break => self.machine.console_break(),
                 ConsoleEvent::Quit => self.quit = true,
                 ConsoleEvent::ProfileReset => self.machine.reset_profile(),
+                ConsoleEvent::Snapshot => self.save_snapshot(),
+                ConsoleEvent::CoreDump => self.write_core(),
             }
         }
         while let Some(&b) = self.pending_input.front() {
@@ -85,7 +92,7 @@ impl Emulator {
             match ev {
                 ConsoleEvent::Input(b) => self.pending_aux_input.push_back(b),
                 ConsoleEvent::Break => self.machine.aux_break(),
-                ConsoleEvent::Quit | ConsoleEvent::ProfileReset => {} // main console only
+                ConsoleEvent::Quit | ConsoleEvent::ProfileReset | ConsoleEvent::Snapshot | ConsoleEvent::CoreDump => {} // main console only
             }
         }
         while let Some(&b) = self.pending_aux_input.front() {
@@ -93,6 +100,31 @@ impl Emulator {
                 break;
             }
             self.pending_aux_input.pop_front();
+        }
+    }
+
+    /// `Ctrl-] s`: save the machine to `snapshot_path`.
+    fn save_snapshot(&mut self) {
+        let start = Instant::now();
+        match self.machine.save_snapshot(&self.snapshot_path) {
+            Ok(()) => {
+                let size = std::fs::metadata(&self.snapshot_path).map_or(0, |m| m.len());
+                eprint!(
+                    "\r\n[c1700emu] snapshot saved to {} ({} MB, {:.1} s); restore with --restore\r\n",
+                    self.snapshot_path.display(),
+                    size >> 20,
+                    start.elapsed().as_secs_f64()
+                );
+            }
+            Err(e) => eprint!("\r\n[c1700emu] snapshot failed: {e}\r\n"),
+        }
+    }
+
+    /// `Ctrl-] d`: write an ELF core dump to `core_path`.
+    fn write_core(&mut self) {
+        match self.machine.write_core(&self.core_path) {
+            Ok(n) => eprint!("\r\n[c1700emu] core dump ({n} memory segments) written to {}\r\n", self.core_path.display()),
+            Err(e) => eprint!("\r\n[c1700emu] core dump failed: {e}\r\n"),
         }
     }
 

@@ -43,6 +43,30 @@ pub struct AmdFlash {
 }
 
 impl AmdFlash {
+    /// Snapshot state (docs ch. 20): array contents and each chip's
+    /// command state.
+    pub(super) fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        const STATES: [ChipState; 8] = [
+            ChipState::Read,
+            ChipState::Unlock1,
+            ChipState::Unlock2,
+            ChipState::Autoselect,
+            ChipState::ProgramArmed,
+            ChipState::EraseSetup,
+            ChipState::EraseUnlock1,
+            ChipState::EraseUnlock2,
+        ];
+        v.bytes_fixed(&mut self.store.data);
+        for state in self.state.iter_mut() {
+            let mut tag = STATES.iter().position(|s| s == state).unwrap_or(0) as u8;
+            v.u8(&mut tag);
+            *state = STATES[tag as usize % STATES.len()];
+        }
+        if v.loading() {
+            self.store.dirty = true;
+        }
+    }
+
     pub fn new(chip: &'static AmdChipType) -> Self {
         AmdFlash { store: Storage::new((chip.size * LANES) as usize), chip, state: [ChipState::Read; LANES as usize] }
     }

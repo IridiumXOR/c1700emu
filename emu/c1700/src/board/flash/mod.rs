@@ -49,6 +49,14 @@ pub fn for_size_mb(mb: u32) -> Result<Flash, String> {
 }
 
 impl Flash {
+    /// Snapshot state (docs ch. 20).
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        match self {
+            Flash::Amd(f) => f.visit_state(v),
+            Flash::Intel(f) => f.visit_state(v),
+        }
+    }
+
     fn storage(&self) -> &Storage {
         match self {
             Flash::Amd(f) => &f.store,

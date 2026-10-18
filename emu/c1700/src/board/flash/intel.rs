@@ -79,6 +79,59 @@ pub struct IntelFlash {
 }
 
 impl IntelFlash {
+    /// Snapshot state (docs ch. 20): array contents and each bank's
+    /// command state machine.
+    pub(super) fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        use ppc8xx::state;
+        v.bytes_fixed(&mut self.store.data);
+        let mut banks = self.banks.len();
+        state::usize(v, &mut banks);
+        if banks != self.banks.len() {
+            return v.fail(format!("snapshot has {banks} flash banks, this flash {}", self.banks.len()));
+        }
+        for bank in &mut self.banks {
+            let (mut tag, mut arg) = match bank.mode {
+                Mode::ReadArray => (0u8, 0u16),
+                Mode::ReadId => (1, 0),
+                Mode::ReadQuery => (2, 0),
+                Mode::ReadStatus => (3, 0),
+                Mode::Program => (4, 0),
+                Mode::BufferCount => (5, 0),
+                Mode::BufferData { remaining } => (6, remaining),
+                Mode::BufferConfirm => (7, 0),
+                Mode::Erase => (8, 0),
+                Mode::Lock => (9, 0),
+            };
+            v.u8(&mut tag);
+            v.u16(&mut arg);
+            bank.mode = match tag {
+                0 => Mode::ReadArray,
+                1 => Mode::ReadId,
+                2 => Mode::ReadQuery,
+                3 => Mode::ReadStatus,
+                4 => Mode::Program,
+                5 => Mode::BufferCount,
+                6 => Mode::BufferData { remaining: arg },
+                7 => Mode::BufferConfirm,
+                8 => Mode::Erase,
+                _ => Mode::Lock,
+            };
+            v.u8(&mut bank.status);
+            let mut n = bank.buffer.len();
+            state::usize(v, &mut n);
+            if v.loading() {
+                bank.buffer = vec![(0, 0); n];
+            }
+            for (offset, word) in bank.buffer.iter_mut() {
+                v.u32(offset);
+                v.u16(word);
+            }
+        }
+        if v.loading() {
+            self.store.dirty = true;
+        }
+    }
+
     pub fn new(chip: &'static IntelChipType, banks: usize) -> Self {
         let bank = Bank { mode: Mode::ReadArray, status: SR_READY, buffer: Vec::new() };
         IntelFlash { store: Storage::new(chip.size as usize * banks), chip, banks: vec![bank; banks] }

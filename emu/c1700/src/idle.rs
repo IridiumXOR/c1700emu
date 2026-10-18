@@ -115,6 +115,28 @@ pub struct Idle {
 }
 
 impl Idle {
+    /// Snapshot state (docs ch. 20): the detector's progress; the mode
+    /// comes from the command line, the pass-length histogram is statistics.
+    pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
+        use ppc8xx::state;
+        state::opt_u32(v, &mut self.anchor);
+        state::vec_u32(v, &mut self.candidates);
+        state::vec_u32(v, &mut self.hook_pages);
+        v.u64(&mut self.last_hit);
+        state::u64s(v, &mut self.deltas);
+        state::usize(v, &mut self.pos);
+        v.u32(&mut self.streak);
+        v.u64(&mut self.skips);
+        v.u64(&mut self.skipped_cycles);
+        state::u64s(v, &mut self.rejected);
+        if self.mode == IdleMode::Off {
+            // Restored into a machine run with --idle off: stay off.
+            self.anchor = None;
+            self.candidates.clear();
+            self.hook_pages.clear();
+        }
+    }
+
     pub fn new(mode: IdleMode, choice: Option<AnchorChoice>) -> Self {
         let (anchor, candidates) = match (mode, choice) {
             (IdleMode::Off, _) | (_, None) => (None, vec![]),

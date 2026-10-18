@@ -121,3 +121,68 @@ fn jit_boots_rommon_exactly_like_the_interpreter() {
     assert!(jit.7 == interp.7, "RAM contents");
     assert!(jit.8.contains("regions translated"));
 }
+
+/// A snapshot taken in the middle of the boot and restored into a fresh
+/// machine continues exactly like the original: same instructions, same
+/// virtual time, same console output and RAM, also after typing a command.
+/// Then a core dump of the result is a well-formed ELF file.
+#[test]
+fn snapshot_restore_continues_identically() {
+    if !rom_available() {
+        return;
+    }
+    let cfg = BoardConfig { dram_banks: [16 << 20, 0, 0, 0], net: None, ..BoardConfig::default() };
+    let dir = std::env::temp_dir().join(format!("c1700-snap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let snap = dir.join("mid-boot.snap");
+
+    // Snapshot right after the banner: mid-boot, before memory sizing and
+    // the prompt (the accelerated ROMMON boot is only ~100k steps).
+    let mut original = new_machine(&cfg, 0x2100);
+    let mut early_output = Vec::new();
+    while !String::from_utf8_lossy(&early_output).contains("System Bootstrap") {
+        original.run(1_000, false);
+        early_output.extend(original.take_console_output());
+    }
+    assert!(!String::from_utf8_lossy(&early_output).contains("rommon"), "snapshot taken before the prompt");
+    original.save_snapshot(&snap).unwrap();
+
+    // Boot on to the prompt, type a command, let it answer.
+    let finish = |m: &mut c1700emu::machine::Machine| {
+        let mut out = Vec::new();
+        for i in 0..80 {
+            if i == 60 {
+                type_line(m, "confreg");
+            }
+            m.run(1_000_000, false);
+            out.extend(m.take_console_output());
+        }
+        (String::from_utf8_lossy(&out).into_owned(), m.cpu.cycles, m.cpu.tb, m.cpu.gpr, m.cpu.pc, m.board.dram[0].clone())
+    };
+    let a = finish(&mut original);
+
+    let mut restored = new_machine(&cfg, 0x2100);
+    restored.load_snapshot(&snap).unwrap();
+    let b = finish(&mut restored);
+    assert!(!early_output.is_empty(), "the snapshot was taken after some output");
+    assert!(a.0.contains("rommon 1 >") && a.0.contains("Configuration Summary"), "{}", a.0);
+    assert_eq!(a.0, b.0, "console output after the restore");
+    assert_eq!((a.1, a.2, a.3, a.4), (b.1, b.2, b.3, b.4), "virtual time and registers");
+    assert!(a.5 == b.5, "RAM contents");
+
+    // Snapshots of different configurations are refused.
+    let other = BoardConfig { dram_banks: [32 << 20, 0, 0, 0], net: None, ..BoardConfig::default() };
+    let err = new_machine(&other, 0x2100).load_snapshot(&snap).unwrap_err();
+    assert!(err.contains("RAM"), "{err}");
+
+    // Core dump: ELF32 big-endian PowerPC core with the registers' note.
+    let core = dir.join("core.elf");
+    let segments = restored.write_core(&core).unwrap();
+    let bytes = std::fs::read(&core).unwrap();
+    assert_eq!(&bytes[0..6], &[0x7F, b'E', b'L', b'F', 1, 2]);
+    assert_eq!(u16::from_be_bytes([bytes[16], bytes[17]]), 4, "ET_CORE");
+    assert_eq!(u16::from_be_bytes([bytes[18], bytes[19]]), 20, "EM_PPC");
+    assert_eq!(u16::from_be_bytes([bytes[44], bytes[45]]) as usize, segments + 1, "PT_NOTE + segments");
+    assert!(bytes.len() > 16 << 20, "the RAM is in the dump");
+    std::fs::remove_dir_all(&dir).ok();
+}

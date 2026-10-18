@@ -3,7 +3,8 @@
 //! * **stdio**: the terminal is put in raw mode so every key goes straight to
 //!   the emulated UART. `Ctrl-]` is the escape key:
 //!   `Ctrl-] q` quits, `Ctrl-] b` sends a BREAK, `Ctrl-] p` restarts the
-//!   `--profile` counters, `Ctrl-] Ctrl-]` sends a literal `Ctrl-]`.
+//!   `--profile` counters, `Ctrl-] s` saves a snapshot, `Ctrl-] d` writes
+//!   an ELF core dump (docs ch. 20), `Ctrl-] Ctrl-]` sends a literal `Ctrl-]`.
 //! * **TCP** (`--tcp PORT`): `telnet localhost PORT` (or `nc`). We negotiate
 //!   character mode, strip telnet commands, and map telnet's `send brk` to a
 //!   serial BREAK.
@@ -29,6 +30,10 @@ pub enum ConsoleEvent {
     Quit,
     /// `Ctrl-] p`: restart the `--profile` counters ("profile from now on").
     ProfileReset,
+    /// `Ctrl-] s`: save a snapshot (`--snapshot`).
+    Snapshot,
+    /// `Ctrl-] d`: write an ELF core dump (`--core`).
+    CoreDump,
 }
 
 pub struct Console {
@@ -57,7 +62,7 @@ impl Console {
             if std::io::stdin().is_terminal() {
                 terminal::enable_raw_mode()?;
                 raw_mode = true;
-                eprint!("[c1700emu] console on this terminal; Ctrl-] q = quit, Ctrl-] b = send BREAK\r\n");
+                eprint!("[c1700emu] console on this terminal; Ctrl-] q = quit, Ctrl-] b = send BREAK, Ctrl-] s = snapshot, Ctrl-] d = core dump\r\n");
             }
             let tx = tx.clone();
             thread::spawn(move || stdin_reader(tx));
@@ -124,6 +129,8 @@ fn stdin_reader(tx: Sender<ConsoleEvent>) {
                 b'q' | b'Q' => Some(ConsoleEvent::Quit),
                 b'b' | b'B' => Some(ConsoleEvent::Break),
                 b'p' | b'P' => Some(ConsoleEvent::ProfileReset),
+                b's' | b'S' => Some(ConsoleEvent::Snapshot),
+                b'd' | b'D' => Some(ConsoleEvent::CoreDump),
                 ESCAPE_KEY => Some(ConsoleEvent::Input(ESCAPE_KEY)),
                 _ => None,
             }
