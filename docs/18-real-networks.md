@@ -39,18 +39,43 @@ most.
 
 ## 18.2 TAP: the router on the host's network
 
-A TAP device is a virtual Ethernet interface: what the router sends
-appears on it, what the host sends to it reaches the router. Creating one
-needs root once; after that the emulator opens it as a normal user:
+A **TAP** device is a virtual Ethernet interface in the Linux kernel: a
+program (here the emulator) holds one end, the host's network stack sees
+the other end as an interface like `eth0`. Every frame the router sends
+appears on `tap0`, and every frame the host sends out of `tap0` reaches
+the router's FastEthernet0/0. (A **TUN** device is the same idea one layer
+up, carrying IP packets instead of Ethernet frames; the router needs
+Ethernet, so always `mode tap`.)
+
+### Prerequisites
+
+* The `tun` kernel module (loaded automatically on most distributions;
+  check with `ls -l /dev/net/tun`, load with `sudo modprobe tun`).
+* Root, **once**, to create the device. Created with `user $USER`, the
+  device belongs to you, and the emulator then opens it without any
+  privileges.
+
+### Step 1: create the device
 
 ```bash
-sudo ip tuntap add dev tap0 mode tap user $USER
-sudo ip addr add 192.168.100.1/24 dev tap0
-sudo ip link set tap0 up
-emu/target/release/c1700emu --net tap:tap0 ...
+sudo ip tuntap add dev tap0 mode tap user $USER   # create, owned by you
+sudo ip link set tap0 up                          # bring the host side up
+ip tuntap show                                    # check: "tap0: tap persist user 1000"
 ```
 
-and in IOS:
+The device is *persistent*: it stays until it is deleted or the machine
+reboots, whether or not the emulator is running. Start the emulator with
+`--net tap:tap0`; IOS's interface comes up when you `no shutdown` it.
+
+### Step 2: choose how the router reaches the world
+
+**(a) Host only**: the host and the router share a small private network.
+Enough to ping, telnet into the router, or copy files over TFTP from a
+server on the host.
+
+```bash
+sudo ip addr add 192.168.100.1/24 dev tap0
+```
 
 ```
 Router(config)# interface FastEthernet0/0
@@ -59,14 +84,79 @@ Router(config-if)# no shutdown
 Router# ping 192.168.100.1
 ```
 
-From the host, `ping 192.168.100.2` and `telnet 192.168.100.2` reach the
-router (after configuring `line vty` and a password in IOS). To put the
-router on the real LAN, either bridge the TAP device with the physical
-interface (`ip link add br0 type bridge`, enslave both, move the host's
-address to `br0`), or route/NAT the 192.168.100.0/24 network on the host.
+**(b) Routed with NAT**: the router also reaches the internet through
+the host (like a home router behind the PC). On top of (a):
+
+```bash
+sudo sysctl -w net.ipv4.ip_forward=1
+# replace eth0 with the host's uplink interface (see `ip route show default`)
+sudo nft add table ip c1700
+sudo nft add chain ip c1700 post '{ type nat hook postrouting priority 100 ; }'
+sudo nft add rule ip c1700 post ip saddr 192.168.100.0/24 oifname "eth0" masquerade
+```
+
+```
+Router(config)# ip route 0.0.0.0 0.0.0.0 192.168.100.1
+Router(config)# ip name-server 8.8.8.8
+Router# ping 8.8.8.8
+```
+
+(With iptables instead of nftables: `sudo iptables -t nat -A POSTROUTING -s
+192.168.100.0/24 -o eth0 -j MASQUERADE`. A host firewall such as firewalld
+may also need tap0 in a trusted zone: `sudo firewall-cmd --zone=trusted
+--add-interface=tap0`.)
+
+**(c) Bridged into the LAN**: the router becomes one more machine on the
+physical network, gets an address from the same DHCP server or a static
+one, and other PCs reach it directly. The host's wired interface and tap0
+go into a bridge, and the host's address moves to the bridge:
+
+```bash
+sudo ip link add br0 type bridge
+sudo ip link set eth0 master br0      # the wired uplink (Wi-Fi can't be bridged)
+sudo ip link set tap0 master br0
+sudo ip link set br0 up
+sudo dhclient br0                     # or move the host's static address to br0
+```
+
+Do this from a local console, not over SSH through `eth0`: the host loses
+its address on `eth0` for a moment. With NetworkManager it is easier to
+create the bridge there (`nmcli connection add type bridge ifname br0`,
+then add `eth0` as a bridge port) and only enslave tap0 by hand. In IOS,
+give FastEthernet0/0 a free address of the LAN, or `ip address dhcp`.
+Each router on the LAN needs its own MAC (`--mac`).
+
+### Using it
+
+```bash
+emu/target/release/c1700emu --net tap:tap0 --mac 02:17:00:00:00:01 ...
+```
+
+From the host (setup a or b), `ping 192.168.100.2` reaches the router, and
+`telnet 192.168.100.2` too once IOS has `line vty 0 4` / `password ...` /
+`login`. `sudo tcpdump -ni tap0` shows every frame the router exchanges,
+which is the quickest way to see what is going on.
+
+### Cleaning up
+
+```bash
+sudo ip link del tap0                       # or: sudo ip tuntap del dev tap0 mode tap
+sudo nft delete table ip c1700              # if you used (b)
+sudo ip link set eth0 nomaster; sudo ip link del br0   # if you used (c)
+```
+
+### When it doesn't work
+
+| symptom | cause |
+|---|---|
+| `cannot open TAP device tap0: Operation not permitted` | the device doesn't exist (creating one needs root), or it belongs to another user: create it with `user $USER` |
+| `... No such file or directory` | `/dev/net/tun` missing: `sudo modprobe tun` |
+| the router's interface is up but nothing answers | host side down (`sudo ip link set tap0 up`), no address on tap0 (setup a), or a host firewall dropping tap0 traffic |
+| ping works from the host but not to the internet | NAT or forwarding missing (setup b), or no default route in IOS |
+| two routers on one bridge interfere | they have the same MAC: give each its own `--mac` |
 
 The crate is `tun-tap` (without its tokio feature): it opens the existing
-device with `TUNSETIFF` and gives blocking `send`/`recv`.
+device with the `TUNSETIFF` ioctl and gives blocking `send`/`recv`.
 
 ## 18.3 UDP tunnels: cabling emulators together
 
