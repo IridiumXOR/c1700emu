@@ -27,6 +27,7 @@ pub mod flash;
 pub mod flashfs;
 pub mod iobus;
 pub mod nvram;
+pub mod nvram_config;
 pub mod uart16550;
 pub mod wic;
 

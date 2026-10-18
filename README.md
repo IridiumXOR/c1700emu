@@ -82,9 +82,6 @@ Cisco's software is not part of this repository. You need:
   21 MB), which needs a voice-capable chassis (`--model 1760`, or 1750/1751)
   and 128 MB of RAM. Other C1700 images should work but are untested.
 
-(The author keeps these in a private companion repository, cloned as
-`roms/`: `git clone git@github.com:IridiumXOR/c1700emu-roms.git roms`.)
-
 ## 4. First run: ROMMON
 
 ```bash
@@ -92,14 +89,12 @@ emu/target/release/c1700emu --confreg 0x2100
 ```
 
 `--confreg 0x2100` sets the configuration register's boot field to 0:
-stay in ROMMON. On a fresh NVRAM the ROM warns once that its NVRAM area is
-corrupt (it then writes defaults); that is normal.
+stay in ROMMON.
 
 ```
 System Bootstrap, Version 12.2(1r)XE1, RELEASE SOFTWARE (fc1)
 TAC Support: http://www.cisco.com/cgi-bin/ibld/view.pl?i=support
 Copyright (c) 2001 by cisco Systems, Inc.
-Warning: monitor nvram area is corrupt ... using default values
 C1700 platform with 32768 Kbytes of main memory
 
 rommon 1 > dev
@@ -171,6 +166,29 @@ as when the snapshot was taken (the RAM and flash sizes and the ROM are
 checked, with a message on a mismatch). `--snapshot FILE` chooses where `Ctrl-] s` writes. Snapshots are
 tied to the emulator version that wrote them (a new snapshot format is
 refused with a message: take a new one).
+
+### Configuration files and boot options
+
+Options can live in a TOML file, one `option = value` per command-line
+option (without the dashes); the command line overrides it:
+
+```bash
+emu/target/release/c1700emu --config tools/examples/c1760-ios.toml
+```
+
+```toml
+model = "1760"
+ram = 128
+confreg = "0x2102"                              # written into NVRAM
+rommon-var = ["TFTP_SERVER=10.0.2.2"]           # ROMMON variables, written into NVRAM
+startup-config = "tools/examples/router.cfg"    # IOS startup-config, written into NVRAM
+cpu = "jit"
+```
+
+What the router itself keeps (configuration register, ROMMON variables,
+IOS's `write memory`) is in the NVRAM file and survives between runs;
+`--nvram-info` prints it. Details:
+[`docs/07-running-and-debugging.md`](docs/07-running-and-debugging.md#77-configuration-files-and-what-nvram-keeps).
 
 ## 7. The console
 
@@ -325,6 +343,7 @@ IOS sessions):
 
 | script | what it checks |
 |---|---|
+| `tools/tests/startup_config_test.sh` | IOS boots a fresh NVRAM into `tools/examples/router.cfg` (via a `--config` file) |
 | `tools/tests/serial_test.sh` | two routers with WIC-1Ts: line protocol up, pings both ways |
 | `tools/tests/serial_2t_test.sh` | two routers with WIC-2Ts cabled twice, with DCE ends |
 | `tools/tests/tap_test.sh SNAPSHOT` | a TAP device in an unprivileged network namespace: router ↔ host pings |
@@ -350,7 +369,11 @@ The most used options (all of them: `c1700emu --help`, and
 | `--ram MB` | `32` | main memory (up to 256) |
 | `--nvram FILE`, `--flash FILE` | `c1700-nvram.bin`, `c1700-flash.bin` | persistent NVRAM and flash |
 | `--flash-file IMAGE` | | put a file (an IOS image) into the flash file system |
+| `--config FILE` | | read options from a TOML file (the command line wins) |
 | `--confreg 0xNNNN` | | write the configuration register (0x2100 ROMMON, 0x2102 boot IOS) |
+| `--rommon-var NAME=VALUE` | | set a ROMMON variable in NVRAM (repeatable) |
+| `--startup-config FILE` | | install a text IOS startup-config in NVRAM |
+| `--nvram-info` | | print the configuration register, ROMMON variables and startup-config, then exit |
 | `--cpu interp\|jit\|jit-check` | `interp` | CPU engine |
 | `--idle realtime\|warp\|off` | `realtime` | idle handling: keep the wall clock, skip idle time freely, or none |
 | `--net virtual\|none\|tap:NAME\|udp:LP:HOST:RP` | `virtual` | what the Ethernet port is plugged into |
