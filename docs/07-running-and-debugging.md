@@ -121,6 +121,19 @@ Notes:
   register from GDB does not consume a received character).
 * The FPU/AltiVec registers GDB shows are always 0: the MPC860 has neither.
 * When GDB detaches, emulation continues normally.
+* **With the JIT** (`--cpu jit`) everything works the same, at the JIT's
+  speed. Breakpoints are hook addresses for the JIT: translated code ends
+  before them and the dispatcher stops there, and the JIT starts afresh
+  whenever the set of breakpoints changes (old translations may run
+  through a new breakpoint). Single steps run one instruction, and memory
+  written from GDB goes through the board's code watch, so a patched
+  instruction is what runs next. (The interpreter still checks
+  breakpoints before every instruction, on its slower per-instruction
+  path.) Reaching a breakpoint in IOS's scheduler loop (0x80617648) from
+  power-on with `--idle off`: **6.6 s with the JIT, 124 s with the
+  interpreter**. Test: `c1700/tests/gdb_jit.rs`, a small GDB
+  remote-protocol client that breaks inside a translated loop on every
+  iteration, single-steps and patches the loop from GDB.
 
 Real example from development (chapter 4): the ROM crashed at 0x62000000.
 

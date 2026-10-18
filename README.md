@@ -303,6 +303,9 @@ Serial0/0 is up, line protocol is up
   (gdb) continue
   ```
 
+  It works with `--cpu jit` too, at the JIT's speed: breakpoints stop
+  translated code, and memory patched from GDB is what runs next.
+
 * **Core dumps**: `Ctrl-] d` writes `c1700-core.elf` (memory and registers):
 
   ```bash
