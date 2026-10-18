@@ -302,5 +302,52 @@ for tgt in find_rfi_stage2():
     if ida_name.get_name(tgt).startswith("sub_"):
         ida_name.set_name(tgt, f"exc_stage2_{tgt:08X}", FORCE)
 
+# ---------------------------------------------------------------------------
+# The monitor's command table (docs ch. 25): 55 entries of {char *name,
+# handler, char *help, u32 flags}; flags 1 = privileged (refused, and hidden
+# by `help`, until `priv`), 2 = `priv` itself (never listed). Every handler
+# becomes cmd_<name>; handlers shared by two commands get both in a comment.
+# ---------------------------------------------------------------------------
+CMD_TABLE, CMD_COUNT = 0xFFF2EEC0, 55
+ida_name.set_name(CMD_TABLE, "monitor_command_table", FORCE)
+idc.set_cmt(CMD_TABLE, "55 x {name, handler, help, flags}; flags 1 = privileged, 2 = priv (docs ch. 25)", 1)
+ida_name.set_name(0xFFF2F230, "monitor_command_count", FORCE)
+
+
+def _cstr(ea):
+    return (ida_bytes.get_bytes(ea, 80) or b"").split(b"\0")[0].decode(errors="replace")
+
+
+_handlers = {}
+for i in range(CMD_COUNT):
+    e = CMD_TABLE + 16 * i
+    name, handler, helptext, flags = (ida_bytes.get_dword(e + k) for k in (0, 4, 8, 12))
+    _handlers.setdefault(handler, []).append((_cstr(name), _cstr(helptext), flags))
+for handler, cmds in _handlers.items():
+    if not ida_funcs.get_func(handler):
+        idc.create_insn(handler)
+        ida_funcs.add_func(handler)
+    ida_name.set_name(handler, "cmd_" + cmds[0][0], FORCE)
+    level = {0: "public", 1: "privileged (after priv)", 2: "never listed"}
+    idc.set_func_cmt(handler, "; ".join(f"monitor command '{n}': {h} [{level.get(f, f)}]" for n, h, f in cmds), 1)
+
+MONITOR = [
+    (0xFFF070E0, "monitor_main", None,
+     "Prompt loop. At power-on runs the MONRC monitor variable as a command line (a startup script); the prompt "
+     "is the PS1 variable ('rommon ! > ', '!' = command number). docs ch. 25"),
+    (0xFFF07BEC, "cmd_priv", None,
+     "Password: 4 hex digits = sum of the cookie's first five 16-bit words (per box!); right -> g_monitor_flags |= 8"),
+    (0xFFF0E138, "cmd_menu", None, "Main Diagnostic Menu: 17 hardware tests, Diagnostic Utilities Menu (cookie editor, MPC860 register dump...)"),
+]
+for ea, name, proto, cmt in MONITOR:
+    if not ida_funcs.get_func(ea):
+        idc.create_insn(ea)
+        ida_funcs.add_func(ea)
+    ida_name.set_name(ea, name, FORCE)
+    if cmt:
+        idc.set_func_cmt(ea, cmt, 1)
+ida_name.set_name(0x800064DC, "g_monitor_flags", FORCE)
+idc.set_cmt(0x800064DC, "bit 3 (0x08) = privileged commands unlocked (cmd_priv)", 1)
+
 ida_auto.auto_wait()
 print("c1700 names applied:", len(FUNCS), "functions,", len(GLOBALS), "globals, rfi stage2:", [hex(t) for t in find_rfi_stage2()])

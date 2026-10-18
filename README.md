@@ -328,6 +328,12 @@ Serial0/0 is up, line protocol is up
   `perf report` name translated code by guest address.
 * `--cpu jit-check` runs the JIT and verifies every translated block
   against the interpreter (slow; for finding JIT bugs).
+* **Hidden commands**: ROMMON's privileged commands (`priv`, password
+  3619 for the default cookie; it is a sum of cookie words, so `--mac`
+  changes it) and diagnostic `menu`, and IOS's `service internal`
+  commands: [`docs/25-hidden-commands.md`](docs/25-hidden-commands.md).
+  `tools/rommon_session.py` and `tools/ios_hidden_commands.py` automate
+  them.
 
 ## 11. Tests and benchmark
 
