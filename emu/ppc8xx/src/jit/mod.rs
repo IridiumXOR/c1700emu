@@ -560,6 +560,7 @@ impl Jit {
                 self.stats.entries_translated += region.len() as u64;
                 self.stats.translated_instructions += region.iter().map(|b| b.insns.len() as u64).sum::<u64>();
                 self.stats.translate_time += start.elapsed();
+                log::debug!(target: "jit", "region at {pc:#010x}: {} blocks, {} instructions, translated in {} us", region.len(), region.iter().map(|b| b.insns.len()).sum::<usize>(), start.elapsed().as_micros());
                 let id = self.regions.len();
                 let mut keys = Vec::new();
                 for (i, block) in region.iter().enumerate() {

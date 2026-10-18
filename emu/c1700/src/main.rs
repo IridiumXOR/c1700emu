@@ -19,6 +19,7 @@ use c1700emu::gdb;
 use c1700emu::machine::{CpuEngine, Machine};
 use c1700emu::net::host::HostLink;
 use c1700emu::net::{Link, NetConfig};
+use c1700emu::wakeup::Wakeup;
 use clap::Parser;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -246,8 +247,13 @@ fn setup_logging(args: &Args) -> Result<(), String> {
     if args.trace {
         builder.filter_module("insn", log::LevelFilter::Trace);
     }
-    // "\r\n" so log lines stay readable while the terminal is in raw mode.
-    builder.format(|buf, rec| write!(buf, "[{:5} {}] {}\r\n", rec.level(), rec.target(), rec.args()));
+    // Wall-clock seconds since start (for timing questions such as network
+    // latency), level, target. "\r\n" so log lines stay readable while the
+    // terminal is in raw mode.
+    let start = std::time::Instant::now();
+    builder.format(move |buf, rec| {
+        write!(buf, "[{:10.6} {:5} {}] {}\r\n", start.elapsed().as_secs_f64(), rec.level(), rec.target(), rec.args())
+    });
     if let Some(path) = &args.log {
         let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
         builder.target(env_logger::Target::Pipe(Box::new(std::io::BufWriter::new(file))));
@@ -296,10 +302,12 @@ fn main() -> Result<(), String> {
     }
 
     let mut machine = Machine::new(rom, &cfg, nvram);
+    // Input threads (network, console) wake the emulation loop from idle sleeps.
+    let wakeup = Wakeup::default();
     let host_link = match &args.net {
         _ if args.no_net => None,
-        NetChoice::Tap(name) => Some(HostLink::tap(name)),
-        NetChoice::Udp(port, remote) => Some(HostLink::udp(*port, *remote)),
+        NetChoice::Tap(name) => Some(HostLink::tap(name, wakeup.clone())),
+        NetChoice::Udp(port, remote) => Some(HostLink::udp(*port, *remote, wakeup.clone())),
         NetChoice::Virtual | NetChoice::None => None,
     };
     if let Some(link) = host_link {
@@ -355,9 +363,10 @@ fn main() -> Result<(), String> {
         machine.load_snapshot(path)?;
         log::info!("restored {} in {:.2} s: pc={:#010x}, {} instructions", path.display(), start.elapsed().as_secs_f64(), machine.cpu.pc, machine.cpu.cycles);
     }
-    let console = Console::new(!args.no_stdio, args.tcp).map_err(|e| format!("console: {e}"))?;
-    let aux = args.aux_tcp.map(Console::aux).transpose().map_err(|e| format!("AUX port: {e}"))?;
+    let console = Console::new(!args.no_stdio, args.tcp, wakeup.clone()).map_err(|e| format!("console: {e}"))?;
+    let aux = args.aux_tcp.map(|port| Console::aux(port, wakeup.clone())).transpose().map_err(|e| format!("AUX port: {e}"))?;
     let mut emu = Emulator::new(machine, console, aux);
+    emu.wakeup = wakeup;
     emu.snapshot_path = args.snapshot.clone();
     emu.core_path = args.core.clone();
 

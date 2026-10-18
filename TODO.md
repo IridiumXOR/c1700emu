@@ -50,10 +50,14 @@ Chapter references are to `docs/`.
       devices are now synced at their next event (at most every 4096),
       JIT 415 → 650 MIPS, IOS to `Router>` (--idle off) in 21.3 s,
       chapter 17.16.
-- [ ] 17. Found on the way: in realtime idle mode the emulator sleeps until
-      the next guest timer, so a frame from a TAP/UDP link waits for it
-      (host → router ping 3-15 ms instead of ~1 ms). Wake the idle sleep
-      when a host frame arrives.
+- [x] 17. Found on the way: host → router pings took 7-9 ms. Input threads
+      now wake the idle sleep, the idle stop no longer ignores a pending
+      interrupt, busy work isn't throttled by the idle slack, and ROMMON's
+      key-wait sleep no longer runs under IOS: 0.6-0.7 ms (chapter 18.5).
+- [ ] 18. Found on the way: the JIT compiles on the spot, so when a lot of
+      code gets hot at once (IOS's IP stack under the first pings) the
+      router stalls for hundreds of ms. Compile in a background thread
+      while the interpreter goes on.
 
 ## IDA and docs
 

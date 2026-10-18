@@ -5,6 +5,7 @@ use crate::board::CYCLES_PER_US;
 use crate::console::{Console, ConsoleEvent};
 use crate::idle::IdleMode;
 use crate::machine::{Machine, StopReason};
+use crate::wakeup::Wakeup;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,11 @@ pub const SLICE: u64 = 100_000;
 /// Realtime idle: how far (in cycles) virtual time may run ahead of the
 /// wall clock before the emulator waits (10 ms).
 const PACE_SLACK: u64 = 10_000 * CYCLES_PER_US;
+/// How far ahead a *busy* guest may run (50 ms). More than the idle slack:
+/// work that starts while virtual time is ahead after idling (a frame
+/// arrives, a key is pressed) must not wait for the wall clock to catch up
+/// (docs ch. 18.5).
+const BUSY_SLACK: u64 = 50_000 * CYCLES_PER_US;
 
 pub struct Emulator {
     pub machine: Machine,
@@ -27,6 +33,8 @@ pub struct Emulator {
     /// Where `Ctrl-] s` saves a snapshot and `Ctrl-] d` a core dump.
     pub snapshot_path: std::path::PathBuf,
     pub core_path: std::path::PathBuf,
+    /// Notified by the input threads (console, network): ends idle sleeps.
+    pub wakeup: Wakeup,
 }
 
 impl Emulator {
@@ -41,6 +49,7 @@ impl Emulator {
             last_flush: Instant::now(),
             snapshot_path: "c1700.snap".into(),
             core_path: "c1700-core.elf".into(),
+            wakeup: Wakeup::default(),
         }
     }
 
@@ -155,15 +164,21 @@ impl Emulator {
                 return StopReason::Budget;
             }
             // The guest is spinning in "wait for a key": don't burn a host core.
-            if self.machine.guest_is_idle() && self.pending_input.is_empty() {
-                std::thread::sleep(Duration::from_millis(5));
+            // (Not with realtime idle pacing, which waits by itself: IOS polls
+            // the console all the time, and this sleep delayed everything,
+            // network replies included, by 5 ms; docs ch. 18.5.)
+            if !realtime && self.machine.guest_is_idle() && self.pending_input.is_empty() {
+                self.wakeup.sleep(Duration::from_millis(5));
             }
             // Realtime idle: virtual time got ahead of the wall clock, so wait
-            // (in short steps, to keep the console responsive).
+            // (in short steps, to keep the console responsive), unless input
+            // or a network frame arrives first.
             if realtime {
-                let ahead = self.machine.cpu.cycles.saturating_sub(wall_cycles());
+                let slack = if self.machine.paced { 0 } else { BUSY_SLACK };
+                let ahead = self.machine.cpu.cycles.saturating_sub(wall_cycles() + slack);
                 if ahead > 0 {
-                    std::thread::sleep(Duration::from_micros((ahead / CYCLES_PER_US).min(20_000)));
+                    log::trace!(target: "pace", "ahead of the wall clock by {} us: wait", ahead / CYCLES_PER_US);
+                    self.wakeup.sleep(Duration::from_micros((ahead / CYCLES_PER_US).min(20_000)));
                 }
             }
         }

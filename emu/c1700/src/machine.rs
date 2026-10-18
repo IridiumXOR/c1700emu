@@ -85,6 +85,9 @@ pub struct Machine {
     pub idle_auto: bool,
     /// Realtime pacing: stop a `run` once `cpu.cycles` passes this.
     pub pace_limit: Option<u64>,
+    /// The last `run` stopped at the idle anchor because of `pace_limit`
+    /// (the guest is idle and ahead of the wall clock).
+    pub paced: bool,
     /// `--cpu jit`: the JIT runs the batches instead of the interpreter.
     /// (Breakpoints, tracing, profiling and `--watch` still single-step
     /// through the interpreter.)
@@ -117,6 +120,7 @@ impl Machine {
             idle: Idle::new(IdleMode::Off, None),
             idle_auto: false,
             pace_limit: None,
+            paced: false,
             jit: None,
         };
         m.power_on();
@@ -189,6 +193,7 @@ impl Machine {
     /// PC does not stop us before the first instruction (needed to continue
     /// from a breakpoint).
     pub fn run(&mut self, budget: u64, ignore_breakpoint_at_start: bool) -> StopReason {
+        self.paced = false;
         let check_bp = !self.breakpoints.is_empty();
         // Breakpoints, trace, profile and watch need a look at every
         // instruction; the other hooks live at a few known addresses, so an
@@ -268,7 +273,11 @@ impl Machine {
         }
         if self.idle.anchor == Some(pc) && self.idle.at_anchor(self.cpu.cycles, self.cpu.msr & msr::EE != 0) {
             self.idle_skip();
-            if self.pace_limit.is_some_and(|limit| self.cpu.cycles >= limit) {
+            // Ahead of the wall clock: stop and let the caller wait, unless
+            // the sync in `idle_skip` brought an interrupt (a frame from the
+            // network, a key): that is work, do it now (docs ch. 18.5).
+            if self.pace_limit.is_some_and(|limit| self.cpu.cycles >= limit) && !self.interrupt_pending() {
+                self.paced = true;
                 return Hook::Stop(StopReason::Budget);
             }
         }

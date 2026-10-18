@@ -10,7 +10,8 @@
 //! Frames from the guest go out with one system call. Frames for the guest
 //! are received by a background thread that blocks on the device and hands
 //! them over through a bounded channel, so the emulation loop only does a
-//! cheap `try_recv` when it polls.
+//! cheap `try_recv` when it polls; the thread also wakes the loop if it is
+//! sleeping through idle time ([`Wakeup`]).
 
 use std::collections::VecDeque;
 use std::io;
@@ -18,6 +19,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread;
+
+use crate::wakeup::Wakeup;
 
 /// Frames waiting for the guest; beyond this the newest are dropped (a
 /// guest that stopped receiving must not make us buffer forever).
@@ -39,24 +42,24 @@ impl HostLink {
     /// Open the existing TAP device `name`. Creating one needs root, so it
     /// is created beforehand, owned by the user (docs ch. 18.2):
     /// `sudo ip tuntap add dev tap0 mode tap user $USER`.
-    pub fn tap(name: &str) -> io::Result<Self> {
+    pub fn tap(name: &str, wakeup: Wakeup) -> io::Result<Self> {
         let iface = tun_tap::Iface::without_packet_info(name, tun_tap::Mode::Tap)
             .map_err(|e| io::Error::new(e.kind(), format!("cannot open TAP device {name}: {e}")))?;
         let iface = Arc::new(iface);
         let reader = Arc::clone(&iface);
         let what = format!("TAP device {}", iface.name());
-        let rx = spawn_receiver(&what, move |buf| reader.recv(buf))?;
+        let rx = spawn_receiver(&what, wakeup, move |buf| reader.recv(buf))?;
         Ok(HostLink { what, send: Box::new(move |frame| iface.send(frame)), rx, queue: VecDeque::new(), send_errors: 0 })
     }
 
     /// A UDP tunnel from local port `local_port` to `remote`.
-    pub fn udp(local_port: u16, remote: SocketAddr) -> io::Result<Self> {
+    pub fn udp(local_port: u16, remote: SocketAddr, wakeup: Wakeup) -> io::Result<Self> {
         let bind: SocketAddr = if remote.is_ipv6() { ([0u16; 8], local_port).into() } else { ([0, 0, 0, 0], local_port).into() };
         let socket = UdpSocket::bind(bind).map_err(|e| io::Error::new(e.kind(), format!("cannot bind UDP port {local_port}: {e}")))?;
         socket.connect(remote)?;
         let reader = socket.try_clone()?;
         let what = format!("UDP {local_port} -> {remote}");
-        let rx = spawn_receiver(&what, move |buf| loop {
+        let rx = spawn_receiver(&what, wakeup, move |buf| loop {
             match reader.recv(buf) {
                 // A connected UDP socket reports "connection refused" when the
                 // other end isn't listening yet (ICMP port unreachable): wait on.
@@ -102,7 +105,11 @@ impl HostLink {
 }
 
 /// Start a thread that calls `recv` in a loop and forwards each frame.
-fn spawn_receiver(what: &str, mut recv: impl FnMut(&mut [u8]) -> io::Result<usize> + Send + 'static) -> io::Result<Receiver<Vec<u8>>> {
+fn spawn_receiver(
+    what: &str,
+    wakeup: Wakeup,
+    mut recv: impl FnMut(&mut [u8]) -> io::Result<usize> + Send + 'static,
+) -> io::Result<Receiver<Vec<u8>>> {
     let (tx, rx): (SyncSender<Vec<u8>>, _) = sync_channel(MAX_QUEUED_FRAMES);
     let name = what.to_string();
     thread::Builder::new().name(format!("rx {what}")).spawn(move || {
@@ -110,7 +117,8 @@ fn spawn_receiver(what: &str, mut recv: impl FnMut(&mut [u8]) -> io::Result<usiz
         loop {
             match recv(&mut buf) {
                 Ok(n) => match tx.try_send(buf[..n].to_vec()) {
-                    Ok(()) | Err(TrySendError::Full(_)) => {} // full: drop, like a busy NIC
+                    Ok(()) => wakeup.notify(),
+                    Err(TrySendError::Full(_)) => {} // full: drop, like a busy NIC
                     Err(TrySendError::Disconnected(_)) => return, // the emulator is gone
                 },
                 Err(e) => {
@@ -134,8 +142,8 @@ mod tests {
     fn udp_tunnel_carries_frames_both_ways() {
         let a_port = 40_000 + (std::process::id() % 10_000) as u16;
         let b_port = a_port + 1;
-        let mut a = HostLink::udp(a_port, ([127, 0, 0, 1], b_port).into()).unwrap();
-        let mut b = HostLink::udp(b_port, ([127, 0, 0, 1], a_port).into()).unwrap();
+        let mut a = HostLink::udp(a_port, ([127, 0, 0, 1], b_port).into(), Wakeup::default()).unwrap();
+        let mut b = HostLink::udp(b_port, ([127, 0, 0, 1], a_port).into(), Wakeup::default()).unwrap();
         let frame: Vec<u8> = (0..60u8).collect();
         a.guest_transmit(frame.clone());
         let deadline = Instant::now() + Duration::from_secs(5);

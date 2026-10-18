@@ -220,3 +220,51 @@ are the routers' own keepalives and CDP announcements.
 
   The same trick is handy for experiments: `unshare -r -n` gives a
   throw-away network with TAP devices, bridges and NAT, no root needed.
+
+## 18.5 Latency: why a ping to an idle router took 10 ms
+
+Pinging the router from the host over TAP gave 3-15 ms round trips, where
+a real 1760 answers in well under a millisecond. The router is idle
+almost all the time, so idle handling (chapter 15) was the place to
+look. The emulator's log lines now carry wall-clock timestamps
+(`[  9.049086 DEBUG net] ...`), which made it measurable. Four things
+were in the way, found one after the other:
+
+1. **Sleeping through the frame.** In realtime idle mode virtual time may
+   run up to 10 ms ahead of the wall clock; then the loop sleeps (up to
+   20 ms) until the clock catches up. A frame arriving meanwhile waited
+   for the sleep to end. Now the threads that receive input (the TAP/UDP
+   receiver and the console readers) notify a `Wakeup` (a flag plus a
+   condition variable, `wakeup.rs`), and the loop sleeps on it: an
+   arriving frame ends the sleep at once.
+2. **Stopping with an interrupt pending.** At the idle loop the machine
+   syncs the devices (which delivers the frame and raises the FEC
+   interrupt) and then stopped the run because virtual time was ahead.
+   It no longer stops when that sync brought an interrupt: that is work.
+3. **Throttling the answer.** A guest that is busy while virtual time is
+   ahead was made to wait for the wall clock too, so the answer to a frame
+   that arrived while idling waited out the idle slack. Busy work may now
+   run up to 50 ms ahead (`BUSY_SLACK`); only idle time waits for the
+   clock.
+4. **The "waiting for a key" sleep.** For ROMMON, which busy-waits on the
+   console, the loop sleeps 5 ms whenever the guest has polled the UART
+   20 000 times without input. IOS polls the console all the time, so in
+   IOS that sleep ran on every loop iteration, on top of realtime pacing.
+   The timestamps showed it: between the frame and the reply only 12 288
+   cycles of guest time passed, but 6 ms of wall time. It is skipped
+   when realtime pacing is active.
+
+Host → router pings (`ping -c 80 -i 0.1`, JIT, once warm):
+
+| | round trip |
+|---|---|
+| before | 7-9 ms |
+| after | **0.6-0.7 ms** (the interpreter: 0.74 ms) |
+
+The first ~60 pings after a restore are slower, sometimes by hundreds of
+milliseconds: the JIT compiles the code of the IP stack as it gets hot,
+and compiling is done on the spot (up to 1.5 s of compiling in 2 s of wall
+time, chapter 17.18).
+
+**Tests:** `wakeup::tests::notify_ends_a_sleep_early`; the TAP test
+(`tools/tests/tap_test.sh`) prints the host's ping times.

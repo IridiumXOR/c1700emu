@@ -29,3 +29,4 @@ pub mod machine;
 pub mod mpc860;
 pub mod net;
 pub mod snapshot;
+pub mod wakeup;

@@ -21,6 +21,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::wakeup::Wakeup;
+
 pub const ESCAPE_KEY: u8 = 0x1D; // Ctrl-]
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,17 +46,20 @@ pub struct Console {
 }
 
 impl Console {
-    pub fn new(use_stdio: bool, tcp_port: Option<u16>) -> std::io::Result<Self> {
-        Self::build(use_stdio, tcp_port, "console also")
+    /// `wakeup` is notified of every input event (it ends the emulation
+    /// loop's idle sleep).
+    pub fn new(use_stdio: bool, tcp_port: Option<u16>, wakeup: Wakeup) -> std::io::Result<Self> {
+        Self::build(use_stdio, tcp_port, "console also", wakeup)
     }
 
     /// A TCP-only console for the AUX port.
-    pub fn aux(tcp_port: u16) -> std::io::Result<Self> {
-        Self::build(false, Some(tcp_port), "AUX port")
+    pub fn aux(tcp_port: u16, wakeup: Wakeup) -> std::io::Result<Self> {
+        Self::build(false, Some(tcp_port), "AUX port", wakeup)
     }
 
-    fn build(use_stdio: bool, tcp_port: Option<u16>, what: &str) -> std::io::Result<Self> {
+    fn build(use_stdio: bool, tcp_port: Option<u16>, what: &str, wakeup: Wakeup) -> std::io::Result<Self> {
         let (tx, rx) = channel();
+        let tx = EventSender { tx, wakeup };
         let clients = Arc::new(Mutex::new(Vec::new()));
         let mut raw_mode = false;
 
@@ -117,7 +122,23 @@ impl Drop for Console {
     }
 }
 
-fn stdin_reader(tx: Sender<ConsoleEvent>) {
+/// The input threads' end of the event channel: sending also wakes the
+/// emulation loop.
+#[derive(Clone)]
+struct EventSender {
+    tx: Sender<ConsoleEvent>,
+    wakeup: Wakeup,
+}
+
+impl EventSender {
+    fn send(&self, ev: ConsoleEvent) -> Result<(), std::sync::mpsc::SendError<ConsoleEvent>> {
+        self.tx.send(ev)?;
+        self.wakeup.notify();
+        Ok(())
+    }
+}
+
+fn stdin_reader(tx: EventSender) {
     let mut stdin = std::io::stdin().lock();
     let mut escape = false;
     let mut byte = [0u8; 1];
@@ -158,7 +179,7 @@ const BRK: u8 = 243;
 const OPT_ECHO: u8 = 1;
 const OPT_SGA: u8 = 3;
 
-fn tcp_acceptor(listener: TcpListener, tx: Sender<ConsoleEvent>, clients: Arc<Mutex<Vec<TcpStream>>>) {
+fn tcp_acceptor(listener: TcpListener, tx: EventSender, clients: Arc<Mutex<Vec<TcpStream>>>) {
     for stream in listener.incoming().flatten() {
         let _ = stream.set_nodelay(true);
         // We echo and we don't do line buffering: put telnet in character mode.
@@ -172,7 +193,7 @@ fn tcp_acceptor(listener: TcpListener, tx: Sender<ConsoleEvent>, clients: Arc<Mu
     }
 }
 
-fn telnet_reader(mut stream: TcpStream, tx: Sender<ConsoleEvent>) {
+fn telnet_reader(mut stream: TcpStream, tx: EventSender) {
     #[derive(PartialEq)]
     enum St {
         Data,
