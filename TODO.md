@@ -29,13 +29,14 @@ Chapter references are to `docs/`.
 - [ ] 8. Read flash directly (ROMMON's copy of the 21 MB image is ~10% of
       the benchmark); needs cheap invalidation when the flash leaves
       read-array mode.
-- [ ] 9. Cheaper compare-and-branch: keep the comparison result for the
-      branch instead of re-reading the CR bit.
-- [ ] 10. Keep guest registers in host registers instead of writing every
-      change through to the `Cpu` struct.
+- [x] 9. Cheaper compare-and-branch: a branch tests the comparison's
+      result instead of re-reading the CR bit (chapter 17.13).
+- [x] 10. Guest registers stay in host registers within a guest block
+      (TCG-style dirty tracking, stored at block end, exits and helper
+      calls); whole-region allocation was tried and is slower (chapter 17.13).
 - [ ] 11. Jump directly between regions instead of through the dispatcher.
 - [x] 12. `--cpu jit-check`: every region run verified against the interpreter
-      (record + replay), chapter 17.13; all JIT tests and the ROMMON boot
+      (record + replay), chapter 17.12; all JIT tests and the ROMMON boot
       run in check mode too.
 - [ ] 13. The interpreter is ~2% slower with the JIT built in, even unused
       (mostly code layout; 2% unexplained, chapter 17.9).

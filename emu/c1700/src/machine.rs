@@ -28,7 +28,7 @@ pub enum CpuEngine {
     /// The JIT: hot code translated to host machine code (docs ch. 17).
     Jit,
     /// The JIT, every region run verified against the interpreter
-    /// (lockstep, much slower; docs ch. 17.13).
+    /// (lockstep, much slower; docs ch. 17.12).
     JitCheck,
 }
 

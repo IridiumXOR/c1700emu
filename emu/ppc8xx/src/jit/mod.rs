@@ -326,7 +326,7 @@ impl Jit {
         (n, BatchEnd::Budget)
     }
 
-    /// Lockstep checking (`--cpu jit-check`, docs ch. 17.13): every region
+    /// Lockstep checking (`--cpu jit-check`, docs ch. 17.12): every region
     /// run is replayed by the interpreter and compared; a difference stops
     /// the emulator with a report. Much slower; for verification.
     pub fn set_check(&mut self, on: bool) {

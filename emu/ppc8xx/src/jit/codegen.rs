@@ -11,11 +11,16 @@
 //! helper asked to stop. The count so far lives in a variable, so every
 //! exit reports it exactly.
 //!
-//! **Guest registers** are Cranelift variables: loaded from the `Cpu` struct
-//! the first time the block reads them, then kept in host registers, and
-//! *written through* to the struct on every change. At any exit point (a
-//! fault, a helper call, the end) the struct is therefore up to date, which
-//! is what makes exceptions precise without any extra work.
+//! **Guest registers** are Cranelift variables, as in QEMU's TCG: within a
+//! guest block a register is loaded from the `Cpu` struct the first time it
+//! is read and then lives in a host register; a write only changes the
+//! variable and marks the register *dirty*. Dirty registers are stored back
+//! where the struct must be current: at the end of the guest block, before
+//! an interpreter helper call, and in the exit stubs (each stub stores the
+//! registers dirty at its own exit point, so exceptions stay precise).
+//! Between guest blocks everything is in memory: keeping registers live
+//! across a whole region was tried and is slower on x86-64 (too few host
+//! registers; docs ch. 17.13).
 //!
 //! **Memory accesses** look the page up in a fast table (one load and one
 //! compare). On a hit the access is one host load or store; on a miss, a
@@ -154,7 +159,9 @@ impl Compiler {
                 sig_store,
                 sig_exec,
                 vars: [None; SLOTS],
-                loaded: [false; SLOTS],
+                loaded: 0,
+                dirty: 0,
+                cr_cache: [None; 8],
                 labels: Vec::new(),
                 stubs: Vec::new(),
             };
@@ -201,9 +208,17 @@ enum Clock {
 /// variable.
 enum Stub {
     /// The instruction at `pc` raised an exception.
-    Raised { executed: u32, pc: u32 },
+    Raised { executed: u32, pc: u32, dirty: u64 },
     /// A helper asked to stop: continue at `next_pc`.
-    Exit { executed: u32, next_pc: u32 },
+    Exit { executed: u32, next_pc: u32, dirty: u64 },
+}
+
+/// Register tracking along one path (see `Tx::reg_state`).
+#[derive(Clone, Copy)]
+struct RegState {
+    loaded: u64,
+    dirty: u64,
+    cr_cache: [Option<[Value; 3]>; 8],
 }
 
 /// Where a branch goes.
@@ -246,8 +261,13 @@ struct Tx<'a> {
     sig_store: SigRef,
     sig_exec: SigRef,
     vars: [Option<Variable>; SLOTS],
-    /// The variable holds the slot's current value (else read the struct).
-    loaded: [bool; SLOTS],
+    /// Slots whose variable holds the current value (else read the struct).
+    loaded: u64,
+    /// Slots written since they were last stored to the struct.
+    dirty: u64,
+    /// Per CR field: the (LT, GT, EQ) comparison results that produced it,
+    /// while still valid, so a following branch tests them directly.
+    cr_cache: [Option<[Value; 3]>; 8],
     /// Guest block start → (its Cranelift block, its length).
     labels: Vec<(u32, Block, u32)>,
     stubs: Vec<(Block, Stub)>,
@@ -271,10 +291,10 @@ impl Tx<'_> {
 
     fn read(&mut self, slot: usize) -> Value {
         let var = self.var(slot);
-        if !self.loaded[slot] {
+        if self.loaded & (1 << slot) == 0 {
             let v = self.b.ins().load(I32, MemFlagsData::trusted(), self.cpu, slot_offset(slot));
             self.b.def_var(var, v);
-            self.loaded[slot] = true;
+            self.loaded |= 1 << slot;
         }
         self.b.use_var(var)
     }
@@ -282,8 +302,50 @@ impl Tx<'_> {
     fn write(&mut self, slot: usize, v: Value) {
         let var = self.var(slot);
         self.b.def_var(var, v);
-        self.b.ins().store(MemFlagsData::trusted(), v, self.cpu, slot_offset(slot));
-        self.loaded[slot] = true;
+        self.loaded |= 1 << slot;
+        self.dirty |= 1 << slot;
+        if slot == CR {
+            self.cr_cache = [None; 8];
+        }
+    }
+
+    /// Store the registers in `slots` from their variables to the struct.
+    fn store_slots(&mut self, slots: u64) {
+        for slot in (0..SLOTS).filter(|s| slots & (1 << s) != 0) {
+            let var = self.var(slot);
+            let v = self.b.use_var(var);
+            self.b.ins().store(MemFlagsData::trusted(), v, self.cpu, slot_offset(slot));
+        }
+    }
+
+    /// Bring the struct up to date with every dirty register.
+    fn flush(&mut self) {
+        self.store_slots(self.dirty);
+        self.dirty = 0;
+    }
+
+    // `loaded`, `dirty` and `cr_cache` describe one control-flow path. Where
+    // code splits in two (the fast and slow paths of a memory access), each
+    // side starts from the state at the split, and at the join a register
+    // counts as loaded only if both sides loaded it, as dirty if either
+    // side dirtied it, and a comparison result only if both sides agree.
+
+    fn reg_state(&self) -> RegState {
+        RegState { loaded: self.loaded, dirty: self.dirty, cr_cache: self.cr_cache }
+    }
+
+    fn set_reg_state(&mut self, state: RegState) {
+        (self.loaded, self.dirty, self.cr_cache) = (state.loaded, state.dirty, state.cr_cache);
+    }
+
+    fn merge_reg_state(&mut self, other: RegState) {
+        self.loaded &= other.loaded;
+        self.dirty |= other.dirty;
+        for (mine, theirs) in self.cr_cache.iter_mut().zip(other.cr_cache) {
+            if *mine != theirs {
+                *mine = None;
+            }
+        }
     }
 
     /// `(rA|0)`.
@@ -326,6 +388,7 @@ impl Tx<'_> {
         let lt = self.b.ins().icmp(lt_cc, a, b);
         let gt = self.b.ins().icmp(gt_cc, a, b);
         let eq = self.b.ins().icmp(IntCC::Equal, a, b);
+        let flags = [lt, gt, eq];
         let (lt, gt, eq) = (self.bit(lt), self.bit(gt), self.bit(eq));
         let lt = self.b.ins().ishl_imm_u(lt, 3);
         let gt = self.b.ins().ishl_imm_u(gt, 2);
@@ -336,6 +399,8 @@ impl Tx<'_> {
         let bits = self.b.ins().bor(bits, eq);
         let bits = self.b.ins().bor(bits, so);
         self.set_cr_field(crf, bits);
+        // (after the CR write, which forgets every cached field)
+        self.cr_cache[crf as usize] = Some(flags);
     }
 
     /// Record form: CR0 = signed comparison of `v` with 0, plus SO.
@@ -450,8 +515,10 @@ impl Tx<'_> {
         for (block, &(_, label, _)) in region.iter().zip(&labels) {
             self.b.switch_to_block(label);
             // A guest block can be entered from several places: it re-reads
-            // the registers it uses (the struct is always up to date).
-            self.loaded = [false; SLOTS];
+            // the registers it uses (they are in the struct at block edges).
+            self.loaded = 0;
+            self.dirty = 0;
+            self.cr_cache = [None; 8];
             self.guest_block(block);
         }
     }
@@ -484,6 +551,7 @@ impl Tx<'_> {
     /// guest block if it is in the region and still fits in the budget,
     /// otherwise return to the dispatcher.
     fn goto(&mut self, target: Target, total: Value) {
+        self.flush();
         if let Target::Known(pc) = target {
             if let Some(&(_, label, len)) = self.labels.iter().find(|l| l.0 == pc) {
                 let after = self.b.ins().iadd_imm_u(total, len as i64);
@@ -511,6 +579,8 @@ impl Tx<'_> {
         self.b.ins().return_(&[total]);
     }
 
+    /// A block leaving the region (filled in by `emit_stubs`). It stores
+    /// the registers dirty at this point.
     fn stub(&mut self, stub: Stub) -> Block {
         let block = self.b.create_block();
         self.stubs.push((block, stub));
@@ -521,14 +591,16 @@ impl Tx<'_> {
         for (block, stub) in std::mem::take(&mut self.stubs) {
             self.b.switch_to_block(block);
             match stub {
-                Stub::Raised { executed, pc } => {
+                Stub::Raised { executed, pc, dirty } => {
+                    self.store_slots(dirty);
                     let total = self.total(executed);
                     let fault = self.c(pc);
                     self.b.ins().store(MemFlagsData::trusted(), fault, self.ctx, offset_of!(JitCtx, fault_pc) as i32);
                     let r = self.b.ins().bor_imm_u(total, RAISED as i64);
                     self.b.ins().return_(&[r]);
                 }
-                Stub::Exit { executed, next_pc } => {
+                Stub::Exit { executed, next_pc, dirty } => {
+                    self.store_slots(dirty);
                     let total = self.total(executed);
                     let next = self.c(next_pc);
                     self.b.ins().store(MemFlagsData::trusted(), next, self.cpu, offset_of!(Cpu, pc) as i32);
@@ -543,25 +615,28 @@ impl Tx<'_> {
     /// `Raised` stub; otherwise run `then` (the instruction's remaining
     /// effects), and on EXIT leave through an `Exit` stub.
     fn after_helper(&mut self, status: Value, executed: u32, pc: u32, then: impl FnOnce(&mut Self), join: Block) {
-        let raised = self.stub(Stub::Raised { executed, pc });
+        let raised = self.stub(Stub::Raised { executed, pc, dirty: self.dirty });
         let ok = self.b.create_block();
         let is_exc = self.b.ins().icmp_imm_u(IntCC::Equal, status, EXCEPTION as i64);
         self.b.ins().brif(is_exc, raised, &[], ok, &[]);
         self.b.switch_to_block(ok);
         then(self);
-        let exit = self.stub(Stub::Exit { executed, next_pc: pc.wrapping_add(4) });
+        let exit = self.stub(Stub::Exit { executed, next_pc: pc.wrapping_add(4), dirty: self.dirty });
         let is_exit = self.b.ins().icmp_imm_u(IntCC::Equal, status, EXIT as i64);
         self.b.ins().brif(is_exit, exit, &[], join, &[]);
     }
 
     /// One instruction through the interpreter (`Kind::Helper`).
     fn helper(&mut self, word: u32, steps: u32, pc: u32) {
+        // The interpreter works on the struct: bring it up to date, and
+        // afterwards re-read what is used (it may have changed anything).
+        self.flush();
         let f = self.b.ins().load(I64, MemFlagsData::trusted(), self.ctx, (offset_of!(JitCtx, helpers) + offset_of!(Helpers, exec)) as i32);
         let (w, p) = (self.c(word), self.c(pc));
         let call = self.b.ins().call_indirect(self.sig_exec, f, &[self.ctx, w, p]);
         let status = self.b.inst_results(call)[0];
-        // The interpreter may have changed any register: re-read them.
-        self.loaded = [false; SLOTS];
+        self.loaded = 0;
+        self.cr_cache = [None; 8];
         let join = self.b.create_block();
         self.after_helper(status, steps, pc, |_| {}, join);
         self.b.switch_to_block(join);
@@ -622,6 +697,7 @@ impl Tx<'_> {
         let (fast, slow, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
         self.b.ins().brif(hit, fast, &[], slow, &[]);
 
+        let before = self.reg_state();
         self.b.switch_to_block(fast);
         let host = self.host_address(entry, ea);
         let flags = MemFlagsData::new().with_notrap();
@@ -639,7 +715,9 @@ impl Tx<'_> {
         };
         writeback(self, raw);
         self.b.ins().jump(join, &[]);
+        let fast_state = self.reg_state();
 
+        self.set_reg_state(before);
         self.b.switch_to_block(slow);
         let k = [0, 0, 1, 1, 2][size as usize];
         let f = self.b.ins().load(I64, MemFlagsData::trusted(), self.ctx, (offset_of!(JitCtx, helpers) + offset_of!(Helpers, load) + 8 * k) as i32);
@@ -651,6 +729,7 @@ impl Tx<'_> {
         self.after_helper(status, steps, pc, |t| writeback(t, raw), join);
 
         self.b.switch_to_block(join);
+        self.merge_reg_state(fast_state);
     }
 
     /// A store of the low `size` bytes of `value` at `ea` (and `ea` into rA
@@ -667,6 +746,7 @@ impl Tx<'_> {
         let (fast, slow, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
         self.b.ins().brif(hit, fast, &[], slow, &[]);
 
+        let before = self.reg_state();
         self.b.switch_to_block(fast);
         let host = self.host_address(entry, ea);
         let flags = MemFlagsData::new().with_notrap();
@@ -686,7 +766,9 @@ impl Tx<'_> {
         }
         writeback(self);
         self.b.ins().jump(join, &[]);
+        let fast_state = self.reg_state();
 
+        self.set_reg_state(before);
         self.b.switch_to_block(slow);
         let k = [0, 0, 1, 1, 2][size as usize];
         let f = self.b.ins().load(I64, MemFlagsData::trusted(), self.ctx, (offset_of!(JitCtx, helpers) + offset_of!(Helpers, store) + 8 * k) as i32);
@@ -695,6 +777,7 @@ impl Tx<'_> {
         self.after_helper(status, steps, pc, writeback, join);
 
         self.b.switch_to_block(join);
+        self.merge_reg_state(fast_state);
     }
 
     fn effective_address(&mut self, ins: Ins, mode: Addr) -> Value {
@@ -742,9 +825,19 @@ impl Tx<'_> {
             cond = Some(self.b.ins().icmp_imm_u(cc, ctr, 0));
         }
         if bo & 0x10 == 0 {
-            let bit = self.cr_bit(bi);
             let want = (bo >> 3) as i64 & 1;
-            let ok = self.b.ins().icmp_imm_u(IntCC::Equal, bit, want);
+            // A bit set by a comparison earlier in this guest block: test
+            // the comparison's result instead of extracting it from CR.
+            let ok = match self.cr_cache[bi as usize / 4] {
+                Some(flags) if bi % 4 < 3 => {
+                    let flag = flags[bi as usize % 4];
+                    if want == 1 { flag } else { self.b.ins().bxor_imm_u(flag, 1) }
+                }
+                _ => {
+                    let bit = self.cr_bit(bi);
+                    self.b.ins().icmp_imm_u(IntCC::Equal, bit, want)
+                }
+            };
             cond = Some(match cond {
                 Some(c) => self.b.ins().band(c, ok),
                 None => ok,
@@ -784,6 +877,7 @@ impl Tx<'_> {
             self.write(LR, ret);
         }
         let total = self.total(len);
+        self.flush(); // before the split: both paths leave the guest block
         match cond {
             None => self.goto(target, total),
             Some(c) => {

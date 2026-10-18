@@ -101,12 +101,13 @@ exception).
 
 **Guest registers** (r0-r31, CR, XER, LR, CTR) are Cranelift *variables*.
 A register is loaded from the `Cpu` struct the first time the block reads
-it, then stays in a host register. Every change is also *written through*
-to the struct. That costs one store per register write, but it makes every
-exit point trivially correct: when the block leaves (end, fault, helper
-call), the struct already holds the exact state, so exceptions are precise
-without any bookkeeping. Cranelift's register allocator and optimiser do
-the rest.
+it, then stays in a host register. In the first version every change was
+also *written through* to the struct. That costs one store per register
+write, but it makes every exit point trivially correct: when the block
+leaves (end, fault, helper call), the struct already holds the exact
+state, so exceptions are precise without any bookkeeping. (Today stores
+are delayed to the end of the guest block and the exits, 17.13.)
+Cranelift's register allocator and optimiser do the rest.
 
 **Semantics** mirror `execute.rs` line by line. Some details that matter:
 
@@ -138,8 +139,9 @@ fff16844: cmplw cr1, r3, r0      ; reached the end?
 fff16848: blt   cr1, -0xc
 ```
 
-The host code Cranelift generated (x86-64, fast path only; `%rsi` = the
-`Cpu` struct, `%rdi` = the context; comments added):
+The host code Cranelift generated in the first version (x86-64, fast
+path only; `%rsi` = the `Cpu` struct, `%rdi` = the context; comments
+added; 17.13 shows the same loop today):
 
 ```
 movq 8(%rdi), %rcx            ; store table of the current mode
@@ -439,6 +441,11 @@ self-decompression; accelerators and idle detection off):
 | code watched per word | | 197.9 |
 | multi-entry regions (no duplicate compiling) | | 302.2 (compiling: 0.3 s) |
 | clock helpers inlined | **32.0** | **312.6** (93.8 s vs **9.6 s**) |
+| registers per guest block, comparisons feed branches (17.13) | | +1.5% (297.4 → 301.6 in one A/B session) |
+
+(Absolute numbers move by a few percent from one day to the next with
+the machine's state: the old binary gave 297-300 MIPS in the session of
+the last row. Compare steps only within one A/B session.)
 
 The JIT is **~9.8×** the interpreter on this benchmark. 98.9% of the
 instructions run as translated code, a region run averages ~49
@@ -466,7 +473,7 @@ dispatcher ~14%, reading the IOS image out of flash through the device
 path ~10%, the interpreter for the rest (tails, cold code, untranslatable
 instructions).
 
-## 17.13 Lockstep checking: `--cpu jit-check`
+## 17.12 Lockstep checking: `--cpu jit-check`
 
 The tests compare the JIT with the interpreter on chosen programs. To
 verify it on everything IOS does, `--cpu jit-check` checks **every region
@@ -499,18 +506,103 @@ JIT only for helper ones, and the answer has no side effects.
 The ten JIT tests also run in check mode, and the exact ROMMON boot test
 boots with `--cpu jit-check` too. A whole IOS boot: CHECK_RESULT.
 
+## 17.13 Step 10: registers in host registers, comparisons feeding branches
+
+The listing of 17.4 shows two wastes: every register write is stored to
+the struct at once (write-through), and a conditional branch extracts a
+CR bit that the compare right before it has just computed.
+
+**First attempt: registers live for the whole region.** Load every
+register the region uses once, at entry; keep them in variables
+everywhere; store the ones it writes at the exits and around interpreter
+helper calls. The used and written sets must be known before any code is
+emitted, so the region was translated twice (a first pass only collecting
+them). It worked, and it was **slower**: 283 MIPS against 300, twice the
+host code (789 KB against 357), twice the compile time. x86-64 has 15
+usable registers (5 of them preserved across calls), a region touches 20
+or more guest registers, and now all of them are live everywhere: the
+register allocator spills them, every loop edge passes all of them as
+block arguments, every slow-path call saves the live ones, and every exit
+stub stores all the written ones.
+
+**What works is QEMU's TCG scheme, per guest block.** Inside a guest
+block (straight-line code up to its branch) a register is loaded when
+first read; a write only changes the variable and marks the register
+*dirty*. Dirty registers are stored:
+
+* at the end of the guest block, before its branch, so both successors
+  (and other regions, and the dispatcher) find the struct up to date;
+* before an interpreter helper call, which works on the struct;
+  afterwards every register is re-read when next used, since the helper
+  may have changed anything;
+* in each **exit stub**: a stub records the dirty set at its own exit
+  point, so a fault in the third instruction of a block stores what the
+  first two wrote and nothing else. Exceptions stay precise.
+
+One subtlety, found by the lockstep checker (17.12) on the first run. A
+memory access splits the code into a fast path (table hit) and a slow
+path (helper call) that join again, and "loaded" and "dirty" describe one
+path. The first version carried the fast path's state into the slow path:
+after `lwz r5` the fast path had marked r5 dirty, so the slow path's
+fault stub stored r5, a value never defined on that path, which Cranelift
+silently makes 0. In check mode,
+`translated_mode_with_tlb_misses_and_faults` stopped with:
+
+```
+JIT check failed: region at 0x0000100c, 1 instructions: interpreter vs JIT: r5: 0x00000105 vs 0x00000000;
+```
+
+Each side now starts from the state at the split. At the join, a register
+counts as loaded only if both sides loaded it, and as dirty if either
+side dirtied it.
+
+**Comparison results feed the branch.** `compare()` remembers the three
+booleans (LT, GT, EQ) it computed for the CR field it wrote. A following
+`bc` testing bit 0, 1 or 2 of that field uses the boolean directly
+instead of extracting the bit from CR. The cache is forgotten at every CR
+write, at helper calls and at the start of every guest block (its values
+only exist on the code path that computed them). The CR field itself is
+still built and stored, because it is architectural state: the next block
+or an interrupt handler may read it.
+
+The loop of 17.4 today (comments added):
+
+```
+leal 1(%r14), %edx            ; addi r3, r3, 1 (r3 has been in %r14 since the stb)
+movl %edx, 0x7cc(%r12)        ; r3 stored: once per block, at its end (scheduled early)
+cmpl %ecx, %edx ; setb/seta/sete ...  ; cmplw: CR field 1 built ...
+movl %esi, 0x964(%r12)        ;   ... and CR stored, once
+cmpl %ecx, %edx ; jb taken    ; blt cr1: the comparison itself, no CR bit read back
+```
+
+Measured in one A/B session (`tools/bench.sh --cpu jit`, three runs
+each): **297.4 → 301.6 MIPS** (+1.5%), with 11% more host code (stubs
+store their dirty registers). A small gain, because the translated code
+is only ~40% of the benchmark's time; the next sections are about the
+other 60%.
+
+**Tests.** The JIT tests (also in check mode), the random differential
+test against the interpreter, and the ROMMON boot tests pass. Mutations
+are caught: removing the stub stores, the store before a helper or the
+reload after it, or inverting the cached comparison, each makes JIT tests
+fail.
+
 ## 17.14 What limits it, and next steps
 
-* **Flash reads.** ROMMON copies the 21 MB image out of flash through the
-  flash device model. Reading flash directly while it is in read-array
-  mode needs a cheap way to invalidate just those fast-table entries when
-  a command changes the mode (it happens for every word while
-  programming).
-* **CR handling**: a compare builds all four bits of a CR field and a
-  following branch reads one of them back; keeping the comparison result
-  for the branch would save code in every loop.
-* **Write-through registers**: one store per register write; keeping
-  registers in host registers until an exit would save more.
+`perf record -e cycles:u` of the benchmark (after 17.13):
+
+| where | share |
+|---|---|
+| translated code | ~40% |
+| the dispatcher (`run_batch`: finding the next region, the budget) | 14% |
+| reading flash through the device model (`IntelFlash::read16`, `read8_slow`, the `load8` helpers) | ~19% |
+| the interpreter (tails, helper instructions, cold code) | ~12% |
+
+* **Flash reads.** ROMMON copies the 21 MB image out of flash byte by
+  byte through the flash device model. Reading flash directly while it is
+  in read-array mode needs a cheap way to invalidate just those
+  fast-table entries when a command changes the mode (it happens for
+  every word while programming).
 * **Region boundaries**: execution passes between regions through the
   dispatcher; jumping straight from one region into another (chaining)
   would remove that cost.

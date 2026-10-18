@@ -258,7 +258,7 @@ pub enum StepOutcome {
 }
 
 /// The part of the CPU state that instructions change, cheap to copy and
-/// compare (the JIT's lockstep checker, docs ch. 17.13): registers, the
+/// compare (the JIT's lockstep checker, docs ch. 17.12): registers, the
 /// clock, the reservation and the exception counters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchState {

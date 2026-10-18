@@ -1,4 +1,4 @@
-//! Lockstep checking (`--cpu jit-check`, docs ch. 17.13): every translated
+//! Lockstep checking (`--cpu jit-check`, docs ch. 17.12): every translated
 //! region run is verified against the interpreter.
 //!
 //! 1. The region runs on the real platform through a [`Recorder`], with
