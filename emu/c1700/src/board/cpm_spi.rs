@@ -33,7 +33,7 @@ const SPIE_BSY: u8 = 0x04;
 /// The dual-port RAM is 8 KB: the CPM decodes 13 bits of a BD offset.
 const DPRAM_MASK: u16 = 0x1FFF;
 
-fn bd_addr(offset: u16) -> u32 {
+pub(super) fn bd_addr(offset: u16) -> u32 {
     DPRAM + (offset & DPRAM_MASK) as u32
 }
 
@@ -83,14 +83,23 @@ impl Board {
             2 => self.mpc.store16(base + 0x20, tbase),
             _ => {}
         }
+        // SCC1-SCC4 are channels 0, 4, 8 and 12: their transmit commands.
+        if ch % 4 == 0 {
+            self.scc_command(ch as usize / 4, opcode);
+        }
     }
 
-    /// The device on the SPI bus: the ID EEPROM of the selected WIC.
+    /// The device on the SPI bus: the ID EEPROM of the selected WIC
+    /// (`wic.rs`). An empty slot answers with a floating (high) line.
     fn spi_device(&self, tx: &[u8]) -> Vec<u8> {
-        let select = self.io.cpld.peek8(0x18);
-        log::debug!(target: "spi", "SPI transfer select={select:#04x} tx={tx:02x?}");
-        // No WIC models yet: an empty slot answers with a floating (high) line.
-        vec![0xFF; tx.len()]
+        let (select, select3) = (self.io.cpld.peek8(0x18), self.io.cpld.peek8(0x0A));
+        let card = super::wic::selected_eeprom(select, select3).and_then(|slot| self.io.wics[slot].as_ref());
+        let rx = match card {
+            Some(wic) => wic.eeprom_transfer(tx),
+            None => vec![0xFF; tx.len()],
+        };
+        log::debug!(target: "spi", "SPI transfer select={select:#04x}/{select3:#04x} tx={tx:02x?} rx={rx:02x?}");
+        rx
     }
 
     /// SPCOM[STR] was set: send every ready TxBD, receive into RxBDs.

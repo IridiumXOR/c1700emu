@@ -89,7 +89,10 @@ if image == "@":
 else:
     r = wait_for("[yes/no]:", "*** ", limit=1400); mark(f"setup dialog: {r!r}")
 if r == "[yes/no]:":
-    send("no\r"); wait_for("Press RETURN", limit=300)
+    send("no\r")
+    # With a serial interface fitted IOS offers to stop AutoInstall first.
+    if wait_for("Press RETURN", "terminate autoinstall?", limit=300) == "terminate autoinstall?":
+        send("\r"); wait_for("Press RETURN", limit=300)
     for _ in range(3):
         send("\r"); r = wait_for("Router>", limit=60)
         if r:

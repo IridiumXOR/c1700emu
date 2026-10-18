@@ -105,6 +105,61 @@ FUNCS = {
     0x80123944: ("fpga_firmware_register",
                  "Registers the FPGA 'firmware' image: the longer length when no voice card is present "
                  "(slot_voice_present == 0) and IO FPGA reg 0x20 bits 0x40/0x80 are clear. (docs ch. 19)"),
+    # ---- WIC detection and the WIC-1T serial port (docs ch. 23) ----
+    0x80140E2C: ("smart_init_read_slot_eeproms",
+                 "c1700_smart_init.c: per slot, read 64 words of the ID EEPROM (slot_eeprom_read); format 4 "
+                 "(04 FF): TLV card type, else byte 1 = card type -> slot_card_type[], slot_iomem_need[]. (docs ch. 23)"),
+    0x80140B40: ("slot_eeprom_read",
+                 "slot_eeprom_read(spi_ctx, buf, words): SPI transfers 03 <2*word> 00 00 with the slot's EEPROM "
+                 "selected (IO FPGA reg 0x18/0x0A device 3); words byte-swapped for voice slots. (docs ch. 23)"),
+    0x805048E0: ("wic_eeprom_read", "Same SPI READ loop as slot_eeprom_read, for the WIC slot objects. (docs ch. 23)"),
+    0x80504870: ("slot_spi_bit_reverse", "Voice slots (slot_voice_present) have their SPI bits reversed: table 0x82FEB300."),
+    0x80504BF4: ("slot_eeprom_select", "slot_eeprom_select(on, ctx): wic_slot_select device 3 (selected) or 2 (idle)."),
+    0x80516710: ("wic_slot_object_init", "If the slot is occupied (wic_slot_present), read its EEPROM; pick the vtable."),
+    0x80516684: ("wic_slot_present", "Slot occupied? cards_present_mask bits: slot 0 0x02, 1 0x04, 2 0x01, 3 0x20. (docs ch. 23)"),
+    0x801436A4: ("cards_present_mask", "Cached result of the platform's card-present function (pointer at 0x8306B9DC)."),
+    0x80143694: ("c17xx_cards_present", "Default card-present function: IO FPGA reg 0x10 & 6 (slots 0 and 1)."),
+    0x806293D8: ("c1760_cards_present",
+                 "1751/1760 card-present function: reg 0x10 bits 1/2/0/5 for slots 0-3, plus the voice-card "
+                 "presence test (0x05 -> 0x0A) per slot. (docs ch. 23)"),
+    0x80516F04: ("show_diag_wic_slot", "show diag for one WIC/VIC slot: old (v1/v2) or v4 EEPROM layout. (docs ch. 23)"),
+    0x80503BF4: ("wic_serial_analyze",
+                 "WIC serial cards (types 2, 0x12, 0x13): SCC channels from wic_slot_scc_channels, create the "
+                 "Serial interfaces (pquicc_serial_create). (docs ch. 23)"),
+    0x80506AEC: ("wic_slot_scc_channels",
+                 "Slot -> SCC channel(s): 1-port cards slot 0 -> 0 (SCC1), slot 1 -> 1 (SCC2); 2-port cards "
+                 "[0,3] / [1,2]. (docs ch. 23)"),
+    0x8050268C: ("pquicc_serial_create", "Allocate a serial IDB on SCC channel n and initialise the driver."),
+    0x80501FDC: ("pquicc_serial_init", "'PowerQUICC Serial' driver setup for one SCC channel."),
+    0x80127B40: ("pquicc_rxbd_base", "RxBD table offset per SCC channel: 0x2430 + 0x100*n (IMMR-relative)."),
+    0x80127BE8: ("pquicc_txbd_base", "TxBD table offset per SCC channel: 0x24B0 + 0x100*n."),
+    0x8050E868: ("wic_serial_modem_init",
+                 "Modem control setup: PCDAT/PBDAT pointers, the card's registers at slot base +4 (cable-ID mux, "
+                 "transceiver strobes) and +8; second port at +0x14/+0x18. (docs ch. 23)"),
+    0x8050E33C: ("wic_cable_id_read", "Cable ID: select mux 3..0 in reg +4 bits 0-1, read bit 0x20 each, MSB first."),
+    0x8050E410: ("wic_cable_id", "Cable ID, read until two reads agree; kept in the driver status word."),
+    0x8050E4A4: ("wic_cable_type",
+                 "Cable ID -> type: bit 0 DCE; 2 V.24, 4 V.35, 6 RS-449, 8 X.21, 14 530, 16 530A; 1 = no cable. (docs ch. 23)"),
+    0x8050E9D8: ("wic_cable_is_dte", "DTE unless the cable ID's bit 0 says DCE."),
+    0x8050E1AC: ("wic_transceiver_strobe", "Strobe a mode value into the card's line transceivers through reg +4."),
+    0x8050DF64: ("serial_clock_detect", "show controllers: sample PADAT clock pins; toggling = 'TX and RX clocks detected'."),
+    0x804FE6CC: ("show_controllers_serial_cable", "show controllers: 'DTE V.35 ...' or 'No serial cable attached'."),
+    0x80504FC8: ("show_controllers_scc_regs", "show controllers: SCC, CPM interrupt and port registers."),
+    0x8050DD44: ("show_serial_modem_signals", "'DCD=%s DSR=%s DTR=%s RTS=%s CTS=%s'"),
+    0x8050D4D4: ("serial_dcd", "DCD: DTE channel 0 = PCDAT 0x20 (PC10/CD1), 1 = PCDAT 0x80; active low."),
+    0x8050D5D8: ("serial_dsr", "DSR: DTE channel 0 = PBDAT 0x80, 1 = PBDAT 0x20; active low."),
+    0x8050D6DC: ("serial_dtr", "DTR (output): DTE channel 0 = PBDAT 0x800, 1 = PCDAT 0x08; active low."),
+    0x8050D8E4: ("serial_rts", "RTS (output)."),
+    0x8050D918: ("serial_cts", "CTS: DTE channel 0 = PCDAT 0x10 (PC11/CTS1), 1 = PCDAT 0x40; active low."),
+    0x8050DA1C: ("serial_set_dtr", "Drive DTR (channel 0: PBDAT 0x800, active low)."),
+    0x8050DB2C: ("serial_set_rts", "Drive RTS (channel 0: PBDAT 0x1000, active low)."),
+    0x819B5E9C: ("hdlc_send_keepalive",
+                 "Cisco HDLC SLARP keepalive: code 2, myseq, yourseq, 0xFFFF, magic (keepalive_magic). (docs ch. 23)"),
+    0x819BF000: ("slarp_input", "SLARP input: keepalive (code 2) records the peer's myseq, yourseq and magic."),
+    0x819B5FF8: ("hdlc_keepalive_check",
+                 "Keepalive timer: line looped if the peer's magic equals our last one; down after missed "
+                 "keepalives. (docs ch. 23)"),
+    0x8032F308: ("keepalive_magic", "counter++ + uptime (ms) + a constant: identical on two lockstep emulators."),
 }
 
 DATA = {

@@ -480,12 +480,14 @@ impl Machine {
         }
         let slots = self.board.io.slot_access;
         if slots.iter().any(|&(r, w, _)| r + w > 0) {
-            out += "WIC/VIC slots (all empty: reads float to 0xFF):";
+            out += "WIC/VIC slots (window accesses):";
             for (i, (r, w, v)) in slots.iter().enumerate() {
-                out += &format!(" slot {i} r={r} w={w} last={v:#04x};");
+                let card = self.board.io.wics[i].as_ref().map_or("empty".to_string(), |w| format!("{:?}", w.kind));
+                out += &format!(" slot {i} ({card}) r={r} w={w} last={v:#04x};");
             }
             out += "\r\n";
         }
+        out += &self.board.scc_report();
         if !self.board.io.unknown.is_empty() {
             out += "unknown I/O bus devices (offset from 0x68000000: reads/writes/last written):\r\n";
             for (off, (r, w, v)) in &self.board.io.unknown {

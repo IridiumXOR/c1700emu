@@ -88,11 +88,45 @@ pub struct Mpc860 {
     spi_start: bool,
     /// A CPCR command (opcode, channel) waiting for the board to execute it.
     cpm_command: Option<(u8, u8)>,
+    /// SCCs (bit n = SCCn+1) whose transmitter software just poked (TODR,
+    /// GSMR_L): the board runs them (`board/scc.rs`).
+    scc_demand: u8,
+    /// Port pins driven from outside the chip (the WICs' modem signals).
+    pub pins: PortInputs,
+    /// Level of the toggling clock pins at the next PADAT read.
+    clock_phase: bool,
 }
+
+/// External levels on port pins, as the board drives them
+/// (`Board::update_wic_pins`): reads of PCDAT and PBDAT see `*_value` in
+/// the `*_mask` bits; the `pa_clocks` bits of PADAT toggle at every read
+/// (a clock is running on those pins).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PortInputs {
+    pub pc_mask: u16,
+    pub pc_value: u16,
+    pub pb_mask: u32,
+    pub pb_value: u32,
+    pub pa_clocks: u16,
+}
+
+const PADAT: u32 = 0x956;
+const PCDAT: u32 = 0x966;
+const PBDAT: u32 = 0xAC4;
 
 /// CIPR bits of the CPM interrupt sources we model (MPC860UM Table 35-?:
 /// bit n = 0x8000_0000 >> n; SPI is bit 26, IDMA1/IDMA2 bits 10/11).
 const CIPR_SPI: u32 = 0x0000_0020;
+/// SCC1-SCC4 are CIPR bits 1-4 (MPC860UM Figure 34-4).
+const CIPR_SCC: [u32; 4] = [0x4000_0000, 0x2000_0000, 0x1000_0000, 0x0800_0000];
+/// Per-SCC register offsets inside its block (MPC860UM §21.2).
+const SCC_GSMR_L: u32 = 0x00;
+const SCC_TODR: u32 = 0x0C;
+const SCC_SCCE: u32 = 0x10;
+const SCC_SCCM: u32 = 0x14;
+fn scc_block(off: u32) -> Option<(usize, u32)> {
+    (0xA00..0xA80).contains(&off).then(|| (((off - 0xA00) / 0x20) as usize, (off - 0xA00) % 0x20))
+}
 const CIPR_IDMA: [u32; 2] = [0x0020_0000, 0x0010_0000];
 /// IDMA status registers (write-1-to-clear) and masks.
 const IDSR: [u32; 2] = [0x910, 0x918];
@@ -167,6 +201,9 @@ impl Mpc860 {
             stats: None,
             spi_start: false,
             cpm_command: None,
+            scc_demand: 0,
+            pins: PortInputs::default(),
+            clock_phase: false,
         };
         m.power_on_reset();
         m
@@ -303,7 +340,25 @@ impl Mpc860 {
                 cipr |= CIPR_IDMA[ch];
             }
         }
+        for (n, bit) in CIPR_SCC.iter().enumerate() {
+            let base = 0xA00 + 0x20 * n as u32;
+            if self.load16(base + SCC_SCCE) & self.load16(base + SCC_SCCM) != 0 {
+                cipr |= bit;
+            }
+        }
         cipr
+    }
+
+    /// Set bits in SCCE of SCC n (0-3): the SCC engine reports events here.
+    pub fn scc_event(&mut self, n: usize, bits: u16) {
+        let off = 0xA00 + 0x20 * n as u32 + SCC_SCCE;
+        let v = self.load16(off) | bits;
+        self.store16(off, v);
+    }
+
+    /// The board polls this after IMMR writes: SCCs to run (bit n = SCC n).
+    pub fn take_scc_demand(&mut self) -> u8 {
+        std::mem::take(&mut self.scc_demand)
     }
 
     /// CIVR: 5-bit code of the highest-priority unmasked CPM source in bits
@@ -497,6 +552,22 @@ impl Mpc860 {
                 self.store16(CIVR, v);
             }
             PITR => self.store32(PITR, (self.pit.count as u32) << 16),
+            // Port data registers: externally driven pins (16-bit PADAT and
+            // PCDAT are reached through their aligned word).
+            x if x == PADAT & !3 && self.pins.pa_clocks != 0 => {
+                self.clock_phase = !self.clock_phase;
+                let clocks = if self.clock_phase { self.pins.pa_clocks } else { 0 };
+                let v = self.load16(PADAT) & !self.pins.pa_clocks | clocks;
+                self.store16(PADAT, v);
+            }
+            x if x == PCDAT & !3 && self.pins.pc_mask != 0 => {
+                let v = self.load16(PCDAT) & !self.pins.pc_mask | self.pins.pc_value;
+                self.store16(PCDAT, v);
+            }
+            PBDAT if self.pins.pb_mask != 0 => {
+                let v = self.load32(PBDAT) & !self.pins.pb_mask | self.pins.pb_value;
+                self.store32(PBDAT, v);
+            }
             x if (FEC_BASE..FEC_END).contains(&x) => {
                 let v = self.fec.read(x - FEC_BASE, self.load32(x));
                 self.store32(x, v);
@@ -575,6 +646,21 @@ impl Mpc860 {
                 true
             }
             (CIPR, _) => true, // computed from the sources
+            // SCC event registers: write-1-to-clear (16-bit, or the high half
+            // of a 32-bit write).
+            (x, 2 | 4) if scc_block(x).is_some_and(|(_, r)| r == SCC_SCCE) => {
+                let clear = if size == 4 { (value >> 16) as u16 } else { value as u16 };
+                let v = self.load16(x) & !clear;
+                self.store16(x, v);
+                true
+            }
+            // TODR[TOD]: transmit on demand (self-clearing).
+            (x, 2) if scc_block(x).is_some_and(|(_, r)| r == SCC_TODR) => {
+                if value & 0x8000 != 0 {
+                    self.scc_demand |= 1 << scc_block(x).unwrap().0;
+                }
+                true
+            }
             (x, 4) if (FEC_BASE..FEC_END).contains(&x) => {
                 let keep = self.fec.write(x - FEC_BASE, value);
                 self.store32(x, keep);
@@ -586,6 +672,9 @@ impl Mpc860 {
 
     /// Side effects that only need the stored value.
     fn after_write(&mut self, off: u32) {
+        if let Some((n, SCC_GSMR_L)) = scc_block(off) {
+            self.scc_demand |= 1 << n; // the transmitter may just have been enabled
+        }
         match off {
             BR0..=OR7 => self.map_changed(),
             MCR => self.upm_command(),

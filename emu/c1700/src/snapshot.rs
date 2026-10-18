@@ -24,7 +24,9 @@ use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"C1700SNP";
 /// Bump when the state walk changes.
-const VERSION: u32 = 2; // 2: the machine's device-sync horizon (docs ch. 17.16)
+// 2: the machine's device-sync horizon (docs ch. 17.16); 3: SCC and WIC
+// state (docs ch. 23).
+const VERSION: u32 = 3;
 
 /// Writes every visited field.
 struct Saver<W: Write> {

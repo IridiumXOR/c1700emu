@@ -57,9 +57,9 @@ WIC/VIC slots (all empty: reads float to 0xFF): slot 0 r=2 w=2 last=0x05; slot 1
 ```
 
 The behaviour didn't change (the old "unknown device" path also returned
-0xFF), only now it is understood. Emulating an actual card is a separate
-project: a WIC-1T would need its ID EEPROM contents and the CPM SCC in
-HDLC mode.
+0xFF), only now it is understood. Emulating an actual card was a separate
+project, done in chapter 23: the WIC-1T (card-present bits in IO FPGA
+register 0x10, its ID EEPROM, the CPM SCC in HDLC mode, modem signals).
 
 ## 19.2 The IO FPGA registers
 

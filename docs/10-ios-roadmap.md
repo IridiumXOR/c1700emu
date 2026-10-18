@@ -95,7 +95,7 @@ other devices; still to decode.
 | Area | What | Why |
 |------|------|-----|
 | Networking | ✅ receive path (IDMA, chapter 13): IOS pings the virtual host. ✅ TAP devices and UDP tunnels (chapter 18) | telnet into the router from the PC, TFTP from IOS to a real server |
-| WAN cards | CPM **SCC** in HDLC mode + WIC-1T/2T: EEPROM contents over SPI (now working), slot registers | serial interfaces |
+| WAN cards | ✅ WIC-1T (chapter 23): card-present bits, ID EEPROM over SPI, CPM **SCC** in HDLC mode, modem signals; two routers ping over Serial0/0. Still open: WIC-2T, DCE cables | serial interfaces |
 | AUX port | channel B exists; give it its own TCP port | modem/aux line |
 | Watchdog | software watchdog (IOS services SWSR ~42 000× per boot) | fidelity (not needed to run) |
 | Speed | faster interpreter, or **snapshots** (save the machine once IOS is up, restore in seconds) | ~4.8 minutes to `Router>` today |

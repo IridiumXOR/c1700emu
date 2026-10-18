@@ -87,7 +87,8 @@ of RAM compresses away; saving and loading run at memory speed.
 
 The format version changes whenever the walk does, and a snapshot of
 another version is refused with a message (re-take it): version 2 added
-the machine's device-sync horizon (chapter 17.16).
+the machine's device-sync horizon (chapter 17.16), version 3 the SCCs and
+the WIC cards (chapter 23).
 
 **Test** (`c1700/tests/boot.rs::snapshot_restore_continues_identically`):
 take a snapshot of the ROM boot right after the banner, let the original

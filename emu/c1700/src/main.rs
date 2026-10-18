@@ -12,6 +12,7 @@
 //! c1700emu --trace --log trace.txt -n 2000000   # instruction trace of the first 2M instructions
 //! ```
 
+use c1700emu::board::wic::WicKind;
 use c1700emu::board::{BoardConfig, cookie, flashfs, nvram::Nvram};
 use c1700emu::console::Console;
 use c1700emu::emulator::Emulator;
@@ -73,6 +74,25 @@ struct Args {
     /// Board type strapped into CPLD register 4 (bits 0-2).
     #[arg(long, default_value_t = 1)]
     board_id: u8,
+
+    /// WAN interface card in WIC slot 0 (docs ch. 23): wic-1t (one serial
+    /// port, IOS's Serial0).
+    #[arg(long, value_enum)]
+    wic0: Option<WicKind>,
+
+    /// WAN interface card in WIC slot 1 (wic-1t: Serial1).
+    #[arg(long, value_enum)]
+    wic1: Option<WicKind>,
+
+    /// Cable the serial port of the WIC in slot 0 to another emulator:
+    /// udp:LPORT:RHOST:RPORT, one HDLC frame per datagram (docs ch. 23).
+    /// Without it the port has no cable.
+    #[arg(long, value_parser = parse_serial)]
+    serial0: Option<(u16, std::net::SocketAddr)>,
+
+    /// The same for the WIC in slot 1.
+    #[arg(long, value_parser = parse_serial)]
+    serial1: Option<(u16, std::net::SocketAddr)>,
 
     /// Write this configuration register value into NVRAM before booting
     /// (0x8000 = diagnostic messages, 0x2102 = typical IOS default).
@@ -285,7 +305,8 @@ fn main() -> Result<(), String> {
     let pm_id = cookie::pm_id_for_model(&args.model)
         .ok_or_else(|| format!("unknown model {:?}: use one of 1720, 1721, 1750, 1751, 1760", args.model))?;
     let flash_mb = args.flash_size.unwrap_or(if matches!(args.model.as_str(), "1751" | "1760") { 32 } else { 16 });
-    let cfg = BoardConfig { dram_banks: dram_banks(args.ram)?, flash_mb, board_id: args.board_id, net };
+    let wics = [args.wic0, args.wic1, None, None];
+    let cfg = BoardConfig { dram_banks: dram_banks(args.ram)?, flash_mb, board_id: args.board_id, net, wics };
     let mut nvram = Nvram::new(32 * 1024, Some(args.nvram.clone())).map_err(|e| e.to_string())?;
     if cookie::ensure_in_nvram(nvram.bytes_mut(), &cookie::Cookie::default()) {
         log::info!("NVRAM had no valid cookie: wrote a default one (MAC 02:17:00:00:00:01)");
@@ -314,6 +335,13 @@ fn main() -> Result<(), String> {
         let link = link.map_err(|e| e.to_string())?;
         log::info!("Ethernet port connected to {}", link.what);
         machine.board.net = Some(Link::Host(link));
+    }
+    for (slot, spec) in [args.serial0, args.serial1].into_iter().enumerate() {
+        if let Some((port, remote)) = spec {
+            let link = HostLink::udp(port, remote, wakeup.clone()).map_err(|e| e.to_string())?;
+            log::info!("Serial port of WIC slot {slot} connected to {}", link.what);
+            machine.board.connect_serial(slot, link)?;
+        }
     }
     machine.set_engine(args.cpu, args.jit_threshold);
     machine.trace = args.trace;
@@ -426,6 +454,13 @@ fn parse_net(s: &str) -> Result<NetChoice, String> {
                 .ok_or_else(|| format!("{remote:?} does not resolve"))?;
             Ok(NetChoice::Udp(local, remote))
         }
+    }
+}
+
+fn parse_serial(s: &str) -> Result<(u16, std::net::SocketAddr), String> {
+    match parse_net(s)? {
+        NetChoice::Udp(port, remote) => Ok((port, remote)),
+        _ => Err("expected udp:LPORT:RHOST:RPORT".into()),
     }
 }
 

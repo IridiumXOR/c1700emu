@@ -10,8 +10,10 @@ Chapter references are to `docs/`.
   - [x] 1a. TAP tested end to end (pings both ways), without sudo, in a
         user + network namespace: `tools/tests/tap_test.sh` (chapter 18.4).
 - [x] 2. WIC/VIC slots understood and modelled as empty slots (chapter 19.1).
-  - [ ] 2a. Emulate a real card, e.g. WIC-1T: ID EEPROM contents over SPI
-        plus the CPM SCC in HDLC mode (serial interfaces).
+  - [x] 2a. A real card: the WIC-1T (`--wic0 wic-1t`, `--serial0 udp:...`):
+        card-present bits, ID EEPROM over SPI, SCC in HDLC mode, modem
+        signals and cable ID; two routers ping over Serial0/0
+        (chapter 23, tools/tests/serial_test.sh).
 - [x] 3. IO FPGA registers decoded (chapter 19.2); latches are right
       without cards.
 - [x] 4. The 5 boot-time machine checks: deliberate probes past the end

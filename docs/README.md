@@ -31,6 +31,7 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 20 | [Snapshots and core dumps](20-snapshots-and-core-dumps.md) | `Ctrl-] s` / `--restore`: the whole machine in 0.2 s, IOS at `Router#` in 0.3 s; `Ctrl-] d`: ELF core files for GDB |
 | 21 | [Warp mode and the silent console](21-warp-and-the-silent-console.md) | `--idle warp` back; why the console "died": IOS's exec-timeout logout, found with snapshot-based experiments |
 | 22 | [ROMMON runs code from its stack](22-rommon-code-on-the-stack.md) | the "variable next to code" the JIT tripped over: ROMMON copies its checksum loop onto the stack to run it from RAM; traced with core dumps, `--watch` on the RAM alias, IDA |
+| 23 | [A WAN card: the WIC-1T](23-wic-1t-serial.md) | `--wic0 wic-1t --serial0 udp:...`: card-present bits, the ID EEPROM over SPI, the SCC in HDLC mode, modem signals and cable ID, two routers pinging over Serial0/0; the "looped" line of two lockstep emulators |
 
 Reference material:
 
@@ -49,4 +50,5 @@ Reference material:
 * `tools/ios_session.py` — drives an IOS boot and a list of commands unattended (setup dialog, `show`, `ping`...).
 * `tools/ios_refs.py` — finds code referencing a string or an address in a decompressed IOS image.
 * `tools/bench.sh` — the CPU engine benchmark (power-on to 3 billion executed instructions with IOS in flash).
-* `tools/ida/ios_124_8_names.py` — IDA annotations for IOS 12.4(8) (the database stays local in `ida-ios/`): scheduler, MMU, IDMA, FPGA loader, WIC/VIC slots, IO FPGA, `probe_address`.
+* `tools/ida/ios_124_8_names.py` — IDA annotations for IOS 12.4(8) (the database stays local in `ida-ios/`): scheduler, MMU, IDMA, FPGA loader, WIC/VIC slots, IO FPGA, `probe_address`, WIC detection, the PowerQUICC serial driver, HDLC keepalives.
+* `tools/tests/` — end-to-end scripts: `tap_test.sh` (TAP, chapter 18), `serial_test.sh` (two routers over WIC-1T serial ports, chapter 23), `warp_test.py` and `exec_timeout_test.py` (chapter 21).

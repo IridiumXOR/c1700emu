@@ -6,16 +6,17 @@
 //! |-------------------|------------------------------------------|
 //! | 0x00000 - 0x1FFFF | NVRAM (mirrored every NVRAM size)        |
 //! | 0x20000 - 0x2FFFF | CPLD / IO FPGA registers (256 bytes, mirrored) |
-//! | 0x30000, 0x40000, 0x80000, 0xB0000 | WIC/VIC slots 0, 1, 2, 3: empty |
+//! | 0x30000, 0x40000, 0x80000, 0xB0000 | WIC/VIC slots 0, 1, 2, 3 (`wic.rs`) |
 //! | 0x50000 - 0x5FFFF | NS16552 dual UART: channel A = console at +0..7, channel B = AUX at +8..15 |
 //!
 //! **Slots** (docs ch. 19, from IOS 12.4(8)): a 1720/1721 has 2, a
 //! 1750/1751 3, a 1760 4 (slot 2 at 0x80000, slot 3 at 0xB0000). IOS tests
 //! each slot for a card with its own logic (a voice card) by writing 0x05 to
 //! offset 0 and expecting 0x0A back, and polls a status register at offset
-//! 5. Cards are identified by their ID EEPROM over SPI (`cpm_spi.rs`). No
-//! card is fitted: an empty slot drives nothing, so reads float to 0xFF
-//! (the presence test fails, as on a real router) and writes vanish.
+//! 5. Cards are identified by their ID EEPROM over SPI (`cpm_spi.rs`). An
+//! empty slot drives nothing, so reads float to 0xFF (the presence test
+//! fails, as on a real router) and writes vanish; a fitted card (`--wic0`)
+//! answers in its window (`wic.rs`).
 //!
 //! Anything else is logged once per 64 KB slot and reads as 0xFF, which is
 //! what an undriven 8-bit bus returns on this kind of board.
@@ -23,6 +24,7 @@
 use super::cpld::Cpld;
 use super::nvram::Nvram;
 use super::uart16550::Uart16550;
+use super::wic::Wic;
 use std::collections::{BTreeMap, HashSet};
 
 pub struct IoBus {
@@ -37,6 +39,8 @@ pub struct IoBus {
     pub duart_access: [(u64, u64); 2],
     /// (reads, writes, last value written) per WIC/VIC slot, for `--stats`.
     pub slot_access: [(u64, u64, u8); 4],
+    /// Cards in the WIC/VIC slots.
+    pub wics: [Option<Wic>; 4],
     warned: HashSet<u32>,
     /// Accesses to devices we don't model: offset -> (reads, writes, last value written).
     pub unknown: BTreeMap<u32, (u64, u64, u8)>,
@@ -49,6 +53,9 @@ impl IoBus {
         self.cpld.visit_state(v);
         self.uart.visit_state(v);
         self.aux.visit_state(v);
+        for wic in self.wics.iter_mut().flatten() {
+            wic.visit_state(v);
+        }
     }
 
     pub fn new(nvram: Nvram, board_id: u8) -> Self {
@@ -59,6 +66,7 @@ impl IoBus {
             aux: Uart16550::new(),
             duart_access: [(0, 0); 2],
             slot_access: [(0, 0, 0); 4],
+            wics: [None, None, None, None],
             warned: HashSet::new(),
             unknown: BTreeMap::new(),
         }
@@ -90,7 +98,10 @@ impl IoBus {
             }
             window if let Some(slot) = wic_slot(window) => {
                 self.slot_access[slot].0 += 1;
-                0xFF // empty slot: the bus floats
+                match &self.wics[slot] {
+                    Some(wic) => wic.read8(off),
+                    None => 0xFF, // empty slot: the bus floats
+                }
             }
             slot => {
                 self.warn(slot, off, "read");
@@ -115,7 +126,10 @@ impl IoBus {
             window if let Some(slot) = wic_slot(window) => {
                 let e = &mut self.slot_access[slot];
                 e.1 += 1;
-                e.2 = value; // empty slot: nobody latches it
+                e.2 = value;
+                if let Some(wic) = &mut self.wics[slot] {
+                    wic.write8(off, value);
+                } // (empty slot: nobody latches it)
             }
             slot => {
                 self.warn(slot, off, "write");

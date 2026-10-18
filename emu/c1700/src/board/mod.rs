@@ -22,11 +22,13 @@ mod cpm_spi;
 mod fec_dma;
 mod fpga_config;
 mod idma;
+mod scc;
 pub mod flash;
 pub mod flashfs;
 pub mod iobus;
 pub mod nvram;
 pub mod uart16550;
+pub mod wic;
 
 use crate::mpc860::Mpc860;
 use crate::net::{Link, NetConfig, VirtualNetwork};
@@ -79,11 +81,13 @@ pub struct BoardConfig {
     pub board_id: u8,
     /// Virtual network plugged into the Ethernet port (`None` = no cable).
     pub net: Option<NetConfig>,
+    /// Cards in the WIC/VIC slots 0-3 (docs ch. 23).
+    pub wics: [Option<wic::WicKind>; 4],
 }
 
 impl Default for BoardConfig {
     fn default() -> Self {
-        BoardConfig { dram_banks: [32 << 20, 0, 0, 0], flash_mb: 16, board_id: 1, net: None }
+        BoardConfig { dram_banks: [32 << 20, 0, 0, 0], flash_mb: 16, board_id: 1, net: None, wics: [None; 4] }
     }
 }
 
@@ -108,6 +112,11 @@ pub struct Board {
     /// Pages holding JIT-translated code; every write to DRAM (CPU, DMA,
     /// debugger, accelerators) is checked against it.
     code: CodeWatch,
+    /// The CPM's SCCs (HDLC engine state, `scc.rs`).
+    scc: [scc::SccState; 4],
+    /// What the serial ports of WIC slots 0 and 1 (SCC1, SCC2) are cabled
+    /// to: a UDP tunnel to another emulator (`--serial0`, docs ch. 23).
+    pub serial: [Option<crate::net::host::HostLink>; 2],
     /// [`Platform::host_page_epoch`]: moves when a flash bank leaves
     /// read-array mode (its pages may have been handed out for direct reads).
     host_epoch: u64,
@@ -147,12 +156,16 @@ impl Board {
             assert!(size == 0 || (size.is_power_of_two() && size >= 2 << 20), "bad DRAM bank size {size:#x}");
             vec![0u8; size as usize]
         });
-        Board {
+        let mut io = IoBus::new(nvram, cfg.board_id);
+        io.wics = std::array::from_fn(|slot| cfg.wics[slot].map(|kind| wic::Wic::new(kind, slot)));
+        let present = (0..4).filter(|&slot| cfg.wics[slot].is_some()).fold(0, |bits, slot| bits | cpld::CARD_PRESENT[slot]);
+        io.cpld.set_cards_present(present);
+        let mut board = Board {
             mpc: Mpc860::new(),
             rom,
             dram,
             flash,
-            io: IoBus::new(nvram, cfg.board_id),
+            io,
             map: vec![Region::Stale; NUM_PAGES],
             irq_line: false,
             net: cfg.net.clone().map(|c| Link::Virtual(Box::new(VirtualNetwork::new(c)))),
@@ -161,8 +174,12 @@ impl Board {
             watch: None,
             idma_busy: false,
             code: CodeWatch::new(),
+            scc: Default::default(),
+            serial: [None, None],
             host_epoch: 0,
-        }
+        };
+        board.update_wic_pins();
+        board
     }
 
     /// Physical memory for a core dump (docs ch. 20): every run of
@@ -220,6 +237,9 @@ impl Board {
         v.u64(&mut self.now_cycles);
         v.u64(&mut self.last_net_poll);
         v.bool(&mut self.idma_busy);
+        for scc in &mut self.scc {
+            scc.visit_state(v);
+        }
         if v.loading() {
             self.invalidate_map();
             self.code.clear();
@@ -258,6 +278,7 @@ impl Board {
         self.now_cycles += cycles;
         self.mpc.advance(cycles);
         self.fec_dma();
+        self.scc_service();
         if self.net.is_some() && self.now_cycles - self.last_net_poll >= NET_POLL_INTERVAL {
             self.last_net_poll = self.now_cycles;
             let now_us = self.now_cycles / CYCLES_PER_US;
@@ -267,6 +288,42 @@ impl Board {
             }
         }
         self.update_irq();
+    }
+
+    /// Cable the serial port of the WIC in `slot` (0 or 1: SCC1, SCC2) to
+    /// `link`: a V.35 DTE cable with the modem signals up (docs ch. 23).
+    pub fn connect_serial(&mut self, slot: usize, link: crate::net::host::HostLink) -> Result<(), String> {
+        match self.io.wics.get_mut(slot).and_then(|w| w.as_mut()) {
+            Some(wic) if wic.kind == wic::WicKind::Wic1T => wic.cable = wic::Cable::V35Dte,
+            _ => return Err(format!("--serial{slot}: no serial WIC in slot {slot} (add --wic{slot} wic-1t)")),
+        }
+        self.serial[slot] = Some(link);
+        self.update_wic_pins();
+        Ok(())
+    }
+
+    /// Drive the MPC860 port pins the serial WICs' modem signals reach
+    /// (IOS's `sub_8050D4D4`, `D5D8`, `D918`; DTE wiring): DCD, CTS and DSR,
+    /// active low, asserted while a cable is connected; and the transmit
+    /// and receive clock pins, which toggle then (`show controllers`
+    /// samples them: "TX and RX clocks detected").
+    fn update_wic_pins(&mut self) {
+        // Per port: (port C DCD | CTS, port B DSR, port A clocks).
+        const PINS: [(u16, u32, u16); 2] = [(0x0020 | 0x0010, 0x0080, 0x0800 | 0x0100), (0x0080 | 0x0040, 0x0020, 0x0200 | 0x0400)];
+        let mut pins = crate::mpc860::PortInputs::default();
+        for (slot, &(pc, pb, pa)) in PINS.iter().enumerate() {
+            let Some(wic) = &self.io.wics[slot] else { continue };
+            let cabled = wic.cable != wic::Cable::None;
+            pins.pc_mask |= pc;
+            pins.pb_mask |= pb;
+            if !cabled {
+                pins.pc_value |= pc; // deasserted (high)
+                pins.pb_value |= pb;
+            } else {
+                pins.pa_clocks |= pa;
+            }
+        }
+        self.mpc.pins = pins;
     }
 
     /// CPU cycles until a device has something timed to do: the PIT
@@ -284,6 +341,10 @@ impl Board {
         if self.mpc.fec.enabled() && self.mpc.fec.tx_active {
             cycles = cycles.min(FEC_BUSY_INTERVAL);
         }
+        if self.serial.iter().any(Option::is_some) {
+            // Frames from a serial link are picked up at device syncs.
+            cycles = cycles.min(NET_POLL_INTERVAL);
+        }
         cycles
     }
 
@@ -295,6 +356,10 @@ impl Board {
         }
         if self.mpc.take_spi_start() {
             self.spi_transfer();
+        }
+        let demand = self.mpc.take_scc_demand();
+        if demand != 0 {
+            self.scc_service();
         }
         self.idma_service();
     }
