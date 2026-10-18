@@ -20,8 +20,9 @@ Chapter references are to `docs/`.
       (chapter 7).
 - [x] 6. Snapshots (`Ctrl-] s`, `--restore`; IOS at `Router#` in 0.3 s)
       and ELF core dumps for GDB (`Ctrl-] d`), chapter 20.
-- [ ] 7. Warp idle mode made IOS's console go silent and was removed; cause
-      unknown (chapter 15.5).
+- [x] 7. Warp: the "silent console" was IOS's exec-timeout logout (needs a
+      bare RETURN); `--idle warp` is back; a snapshot/idle-detection bug
+      found on the way is fixed (chapter 21, tools/tests/warp_test.py).
 
 ## JIT (chapter 17.12)
 
@@ -43,5 +44,5 @@ Chapter references are to `docs/`.
 - [ ] 14. Identify and annotate the low-memory structure at physical 0x43a0
       (a halfword variable right before code) and the ROM routines at
       0xFFF23C34 / 0xFFF23C88.
-- [ ] 15. Chapter 17's worked example shows code from the first
-      (one block per function) JIT version.
+- [x] 15. Chapter 17's worked example also shows the loop as a region
+      (jump table, step counter, budget check).

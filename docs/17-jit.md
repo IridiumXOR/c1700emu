@@ -167,6 +167,28 @@ what is still wasteful: three compares to build one CR field, the branch
 re-reading a CR bit it just computed, and a return to the dispatcher every
 iteration (solved by regions, 17.10).
 
+**The same loop today, as a region** (17.10). The region holds the loop
+block and the `blr` after it (two blocks, so two entry points), and the
+function now takes the budget and the entry number. The new parts of the
+host code:
+
+```
+movl %ecx, %ecx ; cmpl $2 ; cmovb ; br_table   ; entry number → block (jump table)
+xorl %r15d, %r15d                             ; instructions done so far = 0
+...                                           ; stb / addi / cmplw as before
+shrl $0x1b ; andl $1 ; cmpl $1 ; jz taken     ; blt cr1
+taken:
+leal 8(%r15), %eax                            ; done + this block (4) + the next (4)
+cmpl budget, %eax ; jbe loop                  ; still fits: loop inside the function
+movl $0xfff1683c, cpu.pc ; leal 4(%r15), %eax ; ret   ; else leave with the exact count
+loop:
+leal 4(%r15), %r15d ; jmp body                ; count the iteration, run it again
+```
+
+One call now clears up to `budget / 4` bytes (64 per batch of 256
+instructions) instead of one, and the count in `%r15` is what every exit
+returns, so the dispatcher advances the clock by exactly what ran.
+
 ## 17.5 Step 4: memory accesses and precise exceptions
 
 Every load and store looks its page up in a **fast table** (one per mode:

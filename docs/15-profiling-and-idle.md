@@ -97,8 +97,10 @@ The design follows Dynamips' **idle PC**, adapted to our clock:
 
    A **warp** mode (no wall-clock limit) was tried and removed. After a
    minute of virtual time racing ahead (5.6 virtual hours in one run), IOS
-   stopped answering the console entirely: no echo, no "Press RETURN". I
-   didn't find the cause. Warp would have been nearly useless anyway: during
+   stopped answering the console entirely: no echo. *Solved later
+   (chapter 21): IOS had logged the console out after its 10-minute
+   exec-timeout, and a logged-out line only wakes up on a bare RETURN.
+   `--idle warp` is back.* Warp would have been nearly useless anyway: during
    boot, virtual time is *behind* the wall clock, so realtime mode already
    skips as fast as warp would.
 

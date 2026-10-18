@@ -33,15 +33,12 @@ pub enum IdleMode {
     /// No idle detection.
     Off,
     /// Skip idle time with no wall-clock limit: virtual time races ahead
-    /// while the router is idle (docs ch. 15.5, 21).
+    /// while the router is idle (protocol timers, long uptimes in seconds).
+    /// IOS's console logs out after 10 idle minutes, so press RETURN first
+    /// (docs ch. 21).
     Warp,
     /// Skip idle time, but never let virtual time run ahead of the wall
     /// clock: an idle router sleeps on the host and keeps real time.
-    ///
-    /// (A "warp" mode without the wall-clock limit was tried and removed: after
-    /// a minute of virtual time racing ahead, IOS stopped answering the
-    /// console, cause not found. During boot, realtime skips as fast anyway,
-    /// because virtual time is behind the wall clock there. Docs ch. 15.)
     Realtime,
 }
 
@@ -96,6 +93,8 @@ const MIN_SKIP: u64 = 1_000;
 
 pub struct Idle {
     pub mode: IdleMode,
+    /// How the anchor is chosen (`--idle-pc`), `None` with `--idle off`.
+    choice: Option<AnchorChoice>,
     /// The anchor in use (fixed, or a known one once its code matched).
     pub anchor: Option<u32>,
     /// Known anchors still to be checked against the code (auto mode).
@@ -118,13 +117,32 @@ pub struct Idle {
 }
 
 impl Idle {
-    /// Snapshot state (docs ch. 20): the detector's progress; the mode
-    /// comes from the command line, the pass-length histogram is statistics.
+    /// Snapshot state (docs ch. 20): the detector's progress. What is
+    /// detected (mode, anchor choice) comes from the command line of the
+    /// run that restores: a snapshot saved with `--idle off` restored with
+    /// idle detection on gets it, and vice versa. The pass-length histogram
+    /// is statistics.
     pub fn visit_state(&mut self, v: &mut dyn ppc8xx::state::Visitor) {
         use ppc8xx::state;
-        state::opt_u32(v, &mut self.anchor);
-        state::vec_u32(v, &mut self.candidates);
-        state::vec_u32(v, &mut self.hook_pages);
+        let (mut anchor, mut candidates, mut hook_pages) = (self.anchor, self.candidates.clone(), self.hook_pages.clone());
+        state::opt_u32(v, &mut anchor);
+        state::vec_u32(v, &mut candidates);
+        state::vec_u32(v, &mut hook_pages);
+        if v.loading() {
+            match &self.choice {
+                None => {}
+                Some(AnchorChoice::Fixed(_)) => {} // as configured
+                Some(AnchorChoice::Auto) => match anchor {
+                    // A recognised anchor is still right: memory is restored too.
+                    Some(pc) => {
+                        self.anchor = Some(pc);
+                        self.candidates.clear();
+                        self.hook_pages = vec![pc >> 12];
+                    }
+                    None => self.reset(true),
+                },
+            }
+        }
         v.u64(&mut self.last_hit);
         state::u64s(v, &mut self.deltas);
         state::usize(v, &mut self.pos);
@@ -132,16 +150,10 @@ impl Idle {
         v.u64(&mut self.skips);
         v.u64(&mut self.skipped_cycles);
         state::u64s(v, &mut self.rejected);
-        if self.mode == IdleMode::Off {
-            // Restored into a machine run with --idle off: stay off.
-            self.anchor = None;
-            self.candidates.clear();
-            self.hook_pages.clear();
-        }
     }
 
     pub fn new(mode: IdleMode, choice: Option<AnchorChoice>) -> Self {
-        let (anchor, candidates) = match (mode, choice) {
+        let (anchor, candidates) = match (mode, choice.clone()) {
             (IdleMode::Off, _) | (_, None) => (None, vec![]),
             (_, Some(AnchorChoice::Fixed(pc))) => (Some(pc), vec![]),
             (_, Some(AnchorChoice::Auto)) => (None, KNOWN_ANCHORS.iter().map(|k| k.pc).collect()),
@@ -149,6 +161,7 @@ impl Idle {
         let hook_pages = anchor.iter().chain(&candidates).map(|pc| pc >> 12).collect();
         Idle {
             mode,
+            choice: if mode == IdleMode::Off { None } else { choice },
             anchor,
             candidates,
             hook_pages,
@@ -263,6 +276,83 @@ impl Idle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal in-memory snapshot visitor (saves u64s, replays them).
+    #[derive(Default)]
+    struct Tape {
+        words: Vec<u64>,
+        pos: usize,
+        loading: bool,
+    }
+
+    impl ppc8xx::state::Visitor for Tape {
+        fn u8(&mut self, v: &mut u8) {
+            let mut x = *v as u64;
+            self.u64(&mut x);
+            *v = x as u8;
+        }
+        fn u16(&mut self, v: &mut u16) {
+            let mut x = *v as u64;
+            self.u64(&mut x);
+            *v = x as u16;
+        }
+        fn u32(&mut self, v: &mut u32) {
+            let mut x = *v as u64;
+            self.u64(&mut x);
+            *v = x as u32;
+        }
+        fn u64(&mut self, v: &mut u64) {
+            if self.loading {
+                *v = self.words[self.pos];
+                self.pos += 1;
+            } else {
+                self.words.push(*v);
+            }
+        }
+        fn bool(&mut self, v: &mut bool) {
+            let mut x = *v as u64;
+            self.u64(&mut x);
+            *v = x != 0;
+        }
+        fn bytes_fixed(&mut self, _: &mut [u8]) {}
+        fn bytes(&mut self, _: &mut Vec<u8>) {}
+        fn fail(&mut self, msg: String) {
+            panic!("{msg}");
+        }
+        fn loading(&self) -> bool {
+            self.loading
+        }
+    }
+
+    /// Snapshots carry the detector's progress, not its configuration:
+    /// one saved with --idle off and restored into an auto-mode run must
+    /// look for the anchor again (this used to leave idle detection off),
+    /// and a recognised anchor survives a restore.
+    #[test]
+    fn restore_keeps_the_configured_idle_detection() {
+        let mut tape = Tape::default();
+        Idle::new(IdleMode::Off, None).visit_state(&mut tape);
+        tape.loading = true;
+        let mut auto = Idle::new(IdleMode::Warp, Some(AnchorChoice::Auto));
+        auto.visit_state(&mut tape);
+        assert!(auto.is_candidate(KNOWN_ANCHORS[0].pc), "candidates re-armed after restoring an --idle off snapshot");
+
+        let mut recognised = Idle::new(IdleMode::Realtime, Some(AnchorChoice::Auto));
+        recognised.check_candidate(KNOWN_ANCHORS[0].pc, KNOWN_ANCHORS[0].code);
+        let mut tape = Tape::default();
+        recognised.visit_state(&mut tape);
+        tape.loading = true;
+        let mut restored = Idle::new(IdleMode::Realtime, Some(AnchorChoice::Auto));
+        restored.visit_state(&mut tape);
+        assert_eq!(restored.anchor, Some(KNOWN_ANCHORS[0].pc));
+
+        let mut tape = Tape::default();
+        recognised.visit_state(&mut tape);
+        tape.loading = true;
+        let mut off = Idle::new(IdleMode::Off, None);
+        off.visit_state(&mut tape);
+        assert_eq!(off.anchor, None, "--idle off stays off");
+    }
 
     #[test]
     fn needs_identical_short_passes_with_interrupts_enabled() {

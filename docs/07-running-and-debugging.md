@@ -47,7 +47,7 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--tcp PORT` | also serve the console on telnet |
 | `--aux-tcp PORT` | serve the AUX port (DUART channel B) on telnet; without it AUX output goes to the log |
 | `--watch START:LEN` | (hex) log every bus access to a physical range with the PC, or `DMA` — a watchpoint (chapter 13) |
-| `--idle MODE` | idle detection: `realtime` (default: skip IOS's idle loop, sleep so the router keeps the wall clock) or `off` (chapter 15) |
+| `--idle MODE` | idle detection: `realtime` (default: skip IOS's idle loop, sleep so the router keeps the wall clock), `warp` (skip it with no wall-clock limit, chapter 21) or `off` (chapter 15) |
 | `--idle-pc auto\|ADDR` | idle anchor: `auto` (default; known images, code-checked) or the hex address of IOS's scheduler loop head |
 | `--profile-dump FILE` | with `--profile`: write every sampled PC (whole run and `Ctrl-] p` window) |
 | `--no-stdio` | don't use the terminal (TCP only) |
