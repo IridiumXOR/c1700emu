@@ -261,10 +261,16 @@ Host → router pings (`ping -c 80 -i 0.1`, JIT, once warm):
 | before | 7-9 ms |
 | after | **0.6-0.7 ms** (the interpreter: 0.74 ms) |
 
-The first ~60 pings after a restore are slower, sometimes by hundreds of
-milliseconds: the JIT compiles the code of the IP stack as it gets hot,
-and compiling is done on the spot (up to 1.5 s of compiling in 2 s of wall
-time, chapter 17.18).
+The first ~60 pings after a restore were slower still, sometimes by
+hundreds of milliseconds: the JIT compiled the code of the IP stack as it
+got hot, on the spot (up to 1.5 s of compiling in 2 s of wall time). It
+now compiles in a background thread (chapter 17.17), and the first pings
+are as fast as the rest:
+
+| `ping -c 80 -i 0.1`, JIT, right after a restore | pings 1-30 | 31-50 | 51-80 |
+|---|---|---|---|
+| compiling on the spot | 7-20 ms avg | 158-281 ms avg, max 626 ms | 0.6-0.7 ms |
+| compiling in the background | 0.55-0.6 ms avg | 0.8-1.4 ms avg, max 7.6 ms | **0.3 ms** |
 
 **Tests:** `wakeup::tests::notify_ends_a_sleep_early`; the TAP test
 (`tools/tests/tap_test.sh`) prints the host's ping times.

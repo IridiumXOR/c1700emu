@@ -24,7 +24,7 @@ Chapter references are to `docs/`.
       bare RETURN); `--idle warp` is back; a snapshot/idle-detection bug
       found on the way is fixed (chapter 21, tools/tests/warp_test.py).
 
-## JIT (chapter 17.17)
+## JIT (chapter 17.18)
 
 - [x] 8. Flash read directly in read-array mode (`host_page` + a cheap
       `host_page_epoch` that only empties the fast tables when a command
@@ -54,10 +54,12 @@ Chapter references are to `docs/`.
       now wake the idle sleep, the idle stop no longer ignores a pending
       interrupt, busy work isn't throttled by the idle slack, and ROMMON's
       key-wait sleep no longer runs under IOS: 0.6-0.7 ms (chapter 18.5).
-- [ ] 18. Found on the way: the JIT compiles on the spot, so when a lot of
-      code gets hot at once (IOS's IP stack under the first pings) the
-      router stalls for hundreds of ms. Compile in a background thread
-      while the interpreter goes on.
+- [x] 18. Found on the way: the JIT compiled on the spot, so when a lot of
+      code got hot at once (IOS's IP stack under the first pings) the
+      router stalled for hundreds of ms. Regions are now compiled by a
+      background thread while the interpreter goes on: first pings 0.6 ms
+      instead of up to 626 ms, IOS to `Router>` (--idle off) 18.8 s
+      (chapter 17.17).
 
 ## IDA and docs
 

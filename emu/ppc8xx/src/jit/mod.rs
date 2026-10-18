@@ -33,18 +33,20 @@ mod codegen;
 mod runtime;
 mod scan;
 mod watch;
+mod worker;
 
 pub use watch::{CodeWatch, WORDS_PER_PAGE, word_id};
 
 use crate::mmu::{Access, Fault};
 use crate::{BatchEnd, Cpu, Exception, Platform, StepOutcome, msr};
-use codegen::{Compiler, EARLY, LINKS_PER_BLOCK, Link, RAISED, RegionCode, STEPS};
+use codegen::{Compiler, EARLY, LINKS_PER_BLOCK, Link, RAISED, RegionCode, STEPS, Trampolines};
 use powerpc::{Extensions, Ins};
 use runtime::{Helpers, JitCtx, mode_index};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::time::{Duration, Instant};
+use worker::{Job, Worker};
 
 /// Times a block's start is reached before the block is translated.
 /// Translating costs ~50-100 µs, a few thousand interpreted instructions;
@@ -100,6 +102,8 @@ enum State {
     FirstIsStop(u32),
     /// The platform can't watch this memory for writes (not plain RAM/ROM).
     Unwatched,
+    /// Its region is being compiled in the background: interpret meanwhile.
+    Compiling,
 }
 
 struct Entry {
@@ -127,6 +131,8 @@ enum Interpreted {
     /// decrementer interrupt.
     Tail,
     Unwatched,
+    /// Waiting for the background compiler.
+    Compiling,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -148,6 +154,9 @@ pub struct JitStats {
     pub cold: u64,
     pub tail: u64,
     pub unwatched: u64,
+    pub compiling: u64,
+    /// Background compiles thrown away: the code was rewritten meanwhile.
+    pub compiles_discarded: u64,
     pub stops: u64,
     /// Interrupts and ITLB exceptions entered by the dispatcher.
     pub entries: u64,
@@ -184,9 +193,31 @@ impl Hasher for KeyHasher {
 
 type BlockMap = HashMap<u64, Entry, BuildHasherDefault<KeyHasher>>;
 
+/// A region handed to the background compiler, until its code is installed.
+struct InFlight {
+    pc: u32,
+    pa: u32,
+    mode: u64,
+    /// Start and length of each block.
+    blocks: Vec<(u32, u32)>,
+    /// Its link table: index in `Jit::links`.
+    links: usize,
+}
+
+/// Where regions are compiled.
+enum Backend {
+    /// On the spot, by the dispatcher (deterministic: tests, lockstep check).
+    Inline(Compiler),
+    /// By a worker thread (docs ch. 17.17).
+    Background { worker: Worker, in_flight: HashMap<usize, InFlight>, code_bytes: usize },
+}
+
 pub struct Jit {
     ctx: Box<JitCtx>,
-    compiler: Compiler,
+    backend: Backend,
+    trampolines: Trampolines,
+    /// Moves at every flush: background results of an older epoch are stale.
+    compile_epoch: u64,
     blocks: BlockMap,
     jump: Box<[JumpEntry]>,
     /// 32-byte line (`index_line`) → regions with code on it.
@@ -223,7 +254,9 @@ impl Jit {
     pub fn with_threshold(threshold: u32) -> Self {
         Jit {
             ctx: JitCtx::new(),
-            compiler: Compiler::new(),
+            backend: Backend::Inline(Compiler::new()),
+            trampolines: Trampolines::new(),
+            compile_epoch: 0,
             blocks: BlockMap::default(),
             jump: vec![NO_JUMP; JUMP_ENTRIES].into_boxed_slice(),
             lines: HashMap::new(),
@@ -250,6 +283,7 @@ impl Jit {
     pub fn run_batch<P: Platform>(&mut self, cpu: &mut Cpu, sys: &mut P, max: u64, mut stop_before: impl FnMut(u32) -> bool) -> (u64, BatchEnd) {
         self.ctx.helpers = Helpers::new::<P>();
         self.sync(cpu, sys);
+        self.install_finished(false);
         self.pending_link = std::ptr::null_mut();
         let mut n = 0;
         while n < max {
@@ -315,6 +349,7 @@ impl Jit {
                     }
                     State::FirstIsStop(word) => Action::One(*word),
                     State::Unwatched => Action::Stretch(Interpreted::Unwatched),
+                    State::Compiling => Action::Stretch(Interpreted::Compiling),
                 }
             };
 
@@ -371,6 +406,26 @@ impl Jit {
         self.ctx.tables.flush_all();
     }
 
+    /// Compile regions in a background thread (`true`) or on the spot
+    /// (`false`, the default: deterministic, for tests and checking). Every
+    /// translation made so far is thrown away.
+    pub fn set_background<P: Platform>(&mut self, on: bool, sys: &mut P) {
+        self.flush(sys);
+        self.backend = if on {
+            Backend::Background { worker: Worker::spawn(), in_flight: HashMap::new(), code_bytes: 0 }
+        } else {
+            Backend::Inline(Compiler::new())
+        };
+    }
+
+    /// Host code generated since the last flush.
+    fn code_bytes(&self) -> usize {
+        match &self.backend {
+            Backend::Inline(c) => c.code_bytes,
+            Backend::Background { code_bytes, .. } => *code_bytes,
+        }
+    }
+
     /// Throw every translation away (the machine was reset, or memory was
     /// rewritten behind the platform's back).
     pub fn flush<P: Platform>(&mut self, sys: &mut P) {
@@ -387,7 +442,15 @@ impl Jit {
         self.ctx.map_epoch = sys.memory_map_epoch();
         self.ctx.host_epoch = sys.host_page_epoch();
         self.ctx.mmu_generation = u64::MAX; // re-read at the next sync
-        self.compiler.reset();
+        self.compile_epoch += 1;
+        match &mut self.backend {
+            Backend::Inline(c) => c.reset(),
+            Backend::Background { worker, in_flight, code_bytes } => {
+                in_flight.clear();
+                *code_bytes = 0;
+                worker.reset(self.compile_epoch);
+            }
+        }
         self.stats.flushes += 1;
     }
 
@@ -413,7 +476,7 @@ impl Jit {
         let ctx_ptr: *mut JitCtx = ctx;
         // SAFETY: the region was generated for this JitCtx/Cpu layout; the
         // pointers are live and exclusively used by the code for the call.
-        let r = unsafe { (self.compiler.trampoline)(ctx_ptr, cpu_ptr, budget, t.entry, t.func) };
+        let r = unsafe { (self.trampolines.call)(ctx_ptr, cpu_ptr, budget, t.entry, t.func) };
 
         let steps = (r & STEPS) as u64;
         cpu.advance_clock(steps);
@@ -497,6 +560,7 @@ impl Jit {
             Interpreted::Cold => self.stats.cold += k,
             Interpreted::Tail => self.stats.tail += k,
             Interpreted::Unwatched => self.stats.unwatched += k,
+            Interpreted::Compiling => self.stats.compiling += k,
         }
         (k, end)
     }
@@ -513,18 +577,18 @@ impl Jit {
         key: u64,
         stop_before: &mut impl FnMut(u32) -> bool,
     ) -> Option<State> {
-        if self.compiler.code_bytes > CODE_LIMIT {
+        if self.code_bytes() > CODE_LIMIT {
             self.flush(sys);
         }
         let mode = key & !0xFFFF_FFFF;
         // With translation on, 1 KB sub-pages can have different
         // permissions: a block never crosses one. Real mode: the 4 KB page.
         let boundary = if cpu.msr & msr::IR != 0 { 1024 } else { 4096 };
-        // A region also stops where another one already has an entry: each
-        // piece of code is translated once, and execution passes between
-        // regions through the dispatcher.
+        // A region also stops where another one already has an entry (or
+        // will have, once compiled): each piece of code is translated once.
         let blocks = &self.blocks;
-        let translated = |a: u32| matches!(blocks.get(&(a as u64 | mode)), Some(Entry { state: State::Translated(_), .. }));
+        let translated =
+            |a: u32| matches!(blocks.get(&(a as u64 | mode)), Some(Entry { state: State::Translated(_) | State::Compiling, .. }));
         let mut stop = |a: u32| stop_before(a) || (a != pc && translated(a));
         let region = scan::scan_region(sys, pc, pa, boundary, cpu.msr & msr::PR != 0, &mut stop);
         if region.is_empty() {
@@ -545,43 +609,129 @@ impl Jit {
         // Store entries for watched pages must go: stores to code have to
         // reach the platform, which checks them.
         self.ctx.tables.flush_writes();
-        let start = Instant::now();
+        // The region is registered at once, under its entry only: if its
+        // code is written before it is installed, it is dropped like any
+        // region (and a background result for it is then thrown away).
+        let id = self.regions.len();
+        self.regions.push(Some(vec![key]));
+        watched.sort_unstable();
+        watched.dedup();
+        for line in watched {
+            self.lines.entry(line).or_default().push(id);
+        }
         let mut links: Box<[Link]> = (0..LINKS_PER_BLOCK * region.len()).map(|_| Link::UNUSED).collect();
-        match self.compiler.compile(&region, links.as_mut_ptr()) {
-            Ok((func, targets)) => {
-                for (link, target) in links.iter_mut().zip(targets) {
-                    match target {
-                        Some(pc) => link.target = pc,
-                        None => link.computed = true,
+        let links_ptr = links.as_mut_ptr();
+        self.links.push(links);
+        let job = InFlight {
+            pc,
+            pa,
+            mode,
+            blocks: region.iter().map(|b| (b.start, b.insns.len() as u32)).collect(),
+            links: self.links.len() - 1,
+        };
+        match &mut self.backend {
+            Backend::Inline(compiler) => {
+                let start = Instant::now();
+                match compiler.compile(&region, links_ptr) {
+                    Ok((func, targets)) => {
+                        self.install(id, job, func, targets, start.elapsed());
+                        None
+                    }
+                    Err(e) => {
+                        log::error!(target: "jit", "cannot translate the region at {pc:#010x}: {e}");
+                        Some(State::Unwatched)
                     }
                 }
-                self.links.push(links);
-                self.stats.blocks_translated += 1;
-                self.stats.entries_translated += region.len() as u64;
-                self.stats.translated_instructions += region.iter().map(|b| b.insns.len() as u64).sum::<u64>();
-                self.stats.translate_time += start.elapsed();
-                log::debug!(target: "jit", "region at {pc:#010x}: {} blocks, {} instructions, translated in {} us", region.len(), region.iter().map(|b| b.insns.len()).sum::<usize>(), start.elapsed().as_micros());
-                let id = self.regions.len();
-                let mut keys = Vec::new();
-                for (i, block) in region.iter().enumerate() {
-                    let k = block.start as u64 | mode;
-                    let t = Translated { func, entry: i as u32, len: block.insns.len() as u32 };
-                    self.blocks.insert(k, Entry { pa: pa.wrapping_add(block.start.wrapping_sub(pc)), state: State::Translated(t) });
-                    keys.push(k);
-                }
-                self.regions.push(Some(keys));
-                watched.sort_unstable();
-                watched.dedup();
-                for line in watched {
-                    self.lines.entry(line).or_default().push(id);
-                }
-                None
             }
-            Err(e) => {
-                log::error!(target: "jit", "cannot translate the region at {pc:#010x}: {e}");
-                Some(State::Unwatched)
+            Backend::Background { worker, in_flight, .. } => {
+                // All its block starts wait for it (or the dispatcher would
+                // count them up and compile overlapping regions meanwhile);
+                // the placeholder lists them all, to reset them if dropped.
+                let keys: Vec<u64> = region.iter().map(|b| b.start as u64 | mode).collect();
+                for (&k, b) in keys.iter().zip(&region) {
+                    self.blocks.insert(k, Entry { pa: pa.wrapping_add(b.start.wrapping_sub(pc)), state: State::Compiling });
+                }
+                self.regions[id] = Some(keys);
+                worker.submit(Job { id, epoch: self.compile_epoch, region, links: links_ptr as usize });
+                in_flight.insert(id, job);
+                Some(State::Compiling)
             }
         }
+    }
+
+    /// Wait until the background compiler has finished everything handed
+    /// to it, and install the results (tests: makes the background mode
+    /// deterministic).
+    pub fn wait_for_compiles(&mut self) {
+        self.install_finished(true);
+    }
+
+    /// Install the regions the background compiler finished (`wait`: all
+    /// of them, waiting for those still being compiled).
+    fn install_finished(&mut self, wait: bool) {
+        loop {
+            let Backend::Background { worker, in_flight, code_bytes } = &mut self.backend else { return };
+            if in_flight.is_empty() {
+                return;
+            }
+            let Some(done) = worker.finished(wait) else { return };
+            if done.epoch != self.compile_epoch {
+                continue; // compiled before a flush
+            }
+            *code_bytes = done.code_bytes;
+            let Some(job) = in_flight.remove(&done.id) else { continue };
+            if self.regions[done.id].is_none() {
+                self.stats.compiles_discarded += 1; // its code was written meanwhile
+                continue;
+            }
+            match done.result {
+                Ok((func, targets)) => {
+                    // The code was written by another core: make sure this one
+                    // fetches it fresh (a serializing instruction, as the
+                    // x86 rules for cross-modifying code ask).
+                    #[cfg(target_arch = "x86_64")]
+                    #[allow(unused_unsafe)]
+                    // SAFETY: CPUID is available on every x86-64 processor.
+                    unsafe {
+                        std::arch::x86_64::__cpuid(0);
+                    }
+                    self.install(done.id, job, func as RegionCode, targets, done.time);
+                }
+                Err(e) => {
+                    log::error!(target: "jit", "cannot translate the region at {:#010x}: {e}", job.pc);
+                    self.blocks.insert(job.pc as u64 | job.mode, Entry { pa: job.pa, state: State::Unwatched });
+                }
+            }
+        }
+    }
+
+    /// Make the compiled region `id` runnable: fill in its link targets and
+    /// enter its blocks in the block table.
+    fn install(&mut self, id: usize, job: InFlight, func: RegionCode, targets: Vec<Option<u32>>, time: Duration) {
+        for (link, target) in self.links[job.links].iter_mut().zip(targets) {
+            match target {
+                Some(pc) => link.target = pc,
+                None => link.computed = true,
+            }
+        }
+        let instructions: u32 = job.blocks.iter().map(|b| b.1).sum();
+        self.stats.blocks_translated += 1;
+        self.stats.entries_translated += job.blocks.len() as u64;
+        self.stats.translated_instructions += instructions as u64;
+        self.stats.translate_time += time;
+        log::debug!(target: "jit", "region at {:#010x}: {} blocks, {instructions} instructions, translated in {} us", job.pc, job.blocks.len(), time.as_micros());
+        let mut keys = Vec::new();
+        for (i, &(start, len)) in job.blocks.iter().enumerate() {
+            let k = start as u64 | job.mode;
+            // A region compiled meanwhile may already own a later block.
+            if i > 0 && matches!(self.blocks.get(&k), Some(Entry { state: State::Translated(_), .. })) {
+                continue;
+            }
+            let t = Translated { func, entry: i as u32, len };
+            self.blocks.insert(k, Entry { pa: job.pa.wrapping_add(start.wrapping_sub(job.pc)), state: State::Translated(t) });
+            keys.push(k);
+        }
+        self.regions[id] = Some(keys);
     }
 
     /// Bring the JIT's caches in line with the platform and the MMU.
@@ -635,7 +785,7 @@ impl Jit {
     /// Statistics for `--stats`.
     pub fn report(&self) -> String {
         let s = &self.stats;
-        let interpreted = s.cold + s.tail + s.unwatched + s.stops;
+        let interpreted = s.cold + s.tail + s.unwatched + s.stops + s.compiling;
         let total = (s.jit_instructions + interpreted).max(1);
         let pct = |n: u64| n as f64 * 100.0 / total as f64;
         let mut out = format!(
@@ -644,12 +794,12 @@ impl Jit {
             s.entries_translated,
             s.translated_instructions as f64 / s.blocks_translated.max(1) as f64,
             s.translate_time.as_secs_f64(),
-            self.compiler.code_bytes / 1024,
+            self.code_bytes() / 1024,
             s.flushes,
             s.invalidated_blocks,
         );
         out += &format!(
-            "  instructions: {:.1}% translated code ({} region runs, {} of them chained, avg {:.1}), interpreted: {:.1}% cold, {:.1}% untranslatable, {:.1}% tails, {:.1}% unwatched memory\r\n",
+            "  instructions: {:.1}% translated code ({} region runs, {} of them chained, avg {:.1}), interpreted: {:.1}% cold, {:.1}% untranslatable, {:.1}% tails, {:.1}% unwatched memory, {:.1}% waiting for the compiler\r\n",
             pct(s.jit_instructions),
             s.block_runs + s.chained_runs,
             s.chained_runs,
@@ -658,7 +808,11 @@ impl Jit {
             pct(s.stops),
             pct(s.tail),
             pct(s.unwatched),
+            pct(s.compiling),
         );
+        if s.compiles_discarded > 0 {
+            out += &format!("  {} background compiles discarded (code rewritten meanwhile)\r\n", s.compiles_discarded);
+        }
         out += &format!("  {} exceptions inside blocks, {} early exits, {} interrupt/ITLB entries\r\n", s.exceptions, s.early_exits, s.entries);
         if s.checked_runs > 0 {
             out += &format!("  lockstep check: {} region runs verified against the interpreter, all identical\r\n", s.checked_runs);

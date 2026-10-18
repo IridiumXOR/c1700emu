@@ -13,13 +13,21 @@ use ppc8xx::{BatchEnd, Cpu, msr};
 /// the FEC transmits; short batches exercise the batch-end paths).
 const BATCH: u64 = 256;
 
-/// Run `steps` steps, with the JIT if one is given.
-fn run_engine(cpu: &mut Cpu, board: &mut TestBoard, mut jit: Option<&mut Jit>, steps: u64) {
+/// Run `steps` steps, with the JIT if one is given. With `wait`, the
+/// background compiler's results are installed after every batch (so
+/// installing, and discarding compiles of rewritten code, really happen).
+fn run_engine(cpu: &mut Cpu, board: &mut TestBoard, mut jit: Option<&mut Jit>, steps: u64, wait: bool) {
     let mut done = 0;
     while done < steps {
         let max = BATCH.min(steps - done);
         let (n, end) = match jit.as_deref_mut() {
-            Some(jit) => jit.run_batch(cpu, board, max, |_| false),
+            Some(jit) => {
+                let r = jit.run_batch(cpu, board, max, |_| false);
+                if wait {
+                    jit.wait_for_compiles();
+                }
+                r
+            }
             None => cpu.run_batch(board, max, |_| false),
         };
         done += n;
@@ -77,20 +85,27 @@ fn both(program: &[&str], init: impl Fn(&mut Cpu, &mut TestBoard), steps: u64) -
         (cpu, board)
     };
     let mut reference = fresh();
-    run_engine(&mut reference.0, &mut reference.1, None, steps);
+    run_engine(&mut reference.0, &mut reference.1, None, steps, false);
     let mut last = None;
-    // threshold 3, threshold 1, and threshold 1 with every region run
-    // verified against the interpreter (lockstep check, which panics on
-    // any difference)
-    for (threshold, check) in [(3, false), (1, true), (1, false)] {
+    // threshold 3, threshold 1, threshold 1 with every region run verified
+    // against the interpreter (lockstep check, which panics on any
+    // difference), and threshold 1 compiled in the background (regions
+    // become ready at unpredictable points: the results may not change)
+    for (threshold, check, background) in [(3, false, false), (1, true, false), (1, false, true), (1, false, false)] {
         let (mut cpu, mut board) = fresh();
         let mut jit = Jit::with_threshold(threshold);
         jit.set_check(check);
-        run_engine(&mut cpu, &mut board, Some(&mut jit), steps);
+        jit.set_background(background, &mut board);
+        run_engine(&mut cpu, &mut board, Some(&mut jit), steps, background);
         let run = (cpu, board);
-        assert_same(&reference, &run, &format!("threshold {threshold}, check {check}"));
+        assert_same(&reference, &run, &format!("threshold {threshold}, check {check}, background {background}"));
         if check {
             assert!(jit.stats.checked_runs > 0, "the checker ran");
+        }
+        if background {
+            // (Code that rewrites itself all the time may never get to run
+            // translated: its compiles are discarded instead.)
+            assert!(jit.stats.jit_instructions + jit.stats.compiles_discarded > 0, "background compiles were installed or discarded");
         }
         last = Some((run.0, run.1, jit));
     }
@@ -478,4 +493,23 @@ fn chained_jump_follows_an_instruction_remap() {
     assert!(cpu.gpr[8] > 1000, "calls: {}", cpu.gpr[8]);
     assert!(cpu.gpr[3] > 16 * 500, "the second page's code ran too: r3={}", cpu.gpr[3]);
     assert!(jit.stats.chained_runs > 1000, "chained runs: {}", jit.stats.chained_runs);
+}
+
+/// Background compiling, really concurrent (no waiting): the dispatcher
+/// interprets while the worker compiles, then runs the result. A long loop
+/// must end up running almost entirely as translated code.
+#[test]
+fn background_compiler_takes_over() {
+    let (mut cpu, mut board) = setup(&["addi r3, r3, 1", "xor r4, r4, r3", "b -8"]);
+    let mut jit = Jit::with_threshold(1);
+    jit.set_background(true, &mut board);
+    let start = std::time::Instant::now();
+    let mut steps = 0;
+    while jit.stats.jit_instructions < 1_000_000 && start.elapsed() < std::time::Duration::from_secs(20) {
+        let (n, _) = jit.run_batch(&mut cpu, &mut board, BATCH, |_| false);
+        steps += n;
+    }
+    assert!(jit.stats.jit_instructions >= 1_000_000, "{}", jit.report());
+    assert!(jit.stats.compiling > 0, "the loop was interpreted while being compiled");
+    assert_eq!(cpu.gpr[3] as u64, steps.div_ceil(3).min(u32::MAX as u64), "r3 counts the iterations");
 }

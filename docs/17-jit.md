@@ -475,7 +475,8 @@ self-decompression; accelerators and idle detection off):
 | chaining (17.14) | | +17% (301.1 → 352.9 in one A/B session) |
 | flash read directly (17.15) | | +17% (349.6 → 408.7 in one A/B session) |
 | `Board::fetch` always inlined (17.9) | 35.8 | 414 |
-| devices synced at events (17.16) | **36.3** | **655** (82.7 s vs **4.6 s**) |
+| devices synced at events (17.16) | **36.3** | 655 (82.7 s vs 4.6 s) |
+| compiling in the background (17.17) | | **673** (**4.5 s**) |
 
 (Absolute numbers move by a few percent from one day to the next with
 the machine's state: the old binary gave 297-300 MIPS in the session of
@@ -813,9 +814,72 @@ snapshot continues identically). With IOS: pings to the virtual host
 5/5, the TAP test (both directions), the warp test (×51, console answers)
 and the exec-timeout test, on a new snapshot.
 
-## 17.17 What limits it, and next steps
+## 17.17 Step 14: compiling in the background
 
-`perf record -e cycles:u` of the benchmark (after 17.16): **84%
+Pinging the router from the host (chapter 18.5) showed the JIT's last
+visible cost: compiling. Cranelift needs ~70 µs for any function plus
+~3 µs per IR instruction, so a region takes 0.15-20 ms, and the
+dispatcher used to compile it on the spot, with the guest stopped. When a
+lot of code gets hot together, as IOS's IP stack does under the first
+pings after a restore, that added up to 1.5 s of compiling in 2 s of wall
+time, and pings took up to 626 ms. (Faster Cranelift settings don't help:
+`opt_level=none` and the single-pass register allocator together cut
+compile time by half and run speed by half too.)
+
+So regions are now compiled by a **worker thread** (`jit/worker.rs`), the
+way production JITs do it:
+
+1. The dispatcher still finds the region (scanning reads guest memory),
+   installs the code watch and allocates its link table, then hands the
+   blocks to the worker and marks every block start of the region
+   **Compiling**: those addresses are interpreted meanwhile, without
+   counting hits (which would compile overlapping regions; the first
+   version did, translating 2150 regions instead of 1207).
+2. The worker owns the Cranelift module and its memory. It compiles and
+   sends back the code address and the link targets.
+3. At the start of every batch the dispatcher installs what finished:
+   link targets filled in, blocks entered as translated.
+
+Three things needed care:
+
+* **Rewritten while compiling.** The region is registered as soon as it
+  is handed over, as a placeholder listing its block starts, under the
+  code-watch lines of its code. A write to its code drops it like any
+  region (the blocks go back to cold), and its result is thrown away when
+  it arrives (`compiles discarded` in `--stats`).
+* **Flushes.** A flush moves an epoch and asks the worker to free its
+  module. Results of an older epoch are ignored, and the worker skips old
+  jobs still queued.
+* **The trampoline** lives in a small module of its own that is never
+  freed, so it is valid whichever module the regions come from.
+
+Code written by one core and executed by another is the "cross-modifying
+code" case of the x86 manuals: the dispatcher executes a serializing
+`cpuid` before installing a region from the worker.
+
+`--cpu jit` compiles in the background. `--cpu jit-check` and the tests
+compile on the spot, because the checker verifies one region run at a
+time and the tests want reproducible statistics. The JIT tests also run
+in background mode, with `Jit::wait_for_compiles` after every batch so
+that installing and discarding really happen, plus one test
+(`background_compiler_takes_over`) where the worker runs truly
+concurrently.
+
+**Measured:**
+
+| | compiling on the spot | in the background |
+|---|---|---|
+| host → router pings 31-50 after a restore | 158-281 ms avg, max 626 ms | 0.8-1.4 ms avg |
+| IOS to `Router>`, `--idle off` | 21.3 s | **18.8 s** |
+| benchmark | 655 MIPS | 673 MIPS |
+
+**Tests and mutations.** Ignoring the "dropped meanwhile" check makes
+`self_modifying_code` fail (stale code gets installed); never installing
+results makes all background runs and the takeover test fail.
+
+## 17.18 What limits it, and next steps
+
+`perf record -e cycles:u` of the benchmark (after 17.16; 17.17 moved compiling off the emulation thread): **84%
 translated code**; the dispatcher, the interpreter, Cranelift compiling
 and the devices are 1% or less each. From here on, speed comes from the
 quality of the generated code:

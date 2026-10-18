@@ -161,6 +161,9 @@ impl Machine {
         self.jit = (engine != CpuEngine::Interp).then(|| {
             let mut jit = Box::new(Jit::with_threshold(jit_threshold));
             jit.set_check(engine == CpuEngine::JitCheck);
+            // Compile in a background thread, except when checking, which
+            // verifies region runs one at a time (docs ch. 17.17).
+            jit.set_background(engine == CpuEngine::Jit, &mut self.board);
             jit
         });
     }

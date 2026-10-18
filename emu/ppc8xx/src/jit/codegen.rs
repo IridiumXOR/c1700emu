@@ -121,15 +121,13 @@ fn slot_offset(slot: usize) -> i32 {
 }
 
 /// Owns the Cranelift JIT module (the executable memory) and the reusable
-/// compilation contexts.
+/// compilation contexts. Lives on the thread that compiles: the dispatcher's
+/// (inline compiling) or the background worker's (`worker.rs`).
 pub(super) struct Compiler {
     module: JITModule,
     ctx: Context,
     fctx: FunctionBuilderContext,
     block_sig: Signature,
-    trampoline_sig: Signature,
-    /// The trampoline of the current module.
-    pub trampoline: Trampoline,
     load_sig: Signature,
     store_sig: Signature,
     exec_sig: Signature,
@@ -142,40 +140,40 @@ fn new_module() -> JITModule {
     let flags = [("opt_level", "speed"), ("enable_verifier", "false"), ("preserve_frame_pointers", "true")];
     let builder = JITBuilder::with_flags(&flags, default_libcall_names())
         .expect("Cranelift cannot generate code for this host");
-    JITModule::new(builder)
+    let module = JITModule::new(builder);
+    assert_eq!(module.target_config().pointer_type(), I64, "the JIT needs a 64-bit host");
+    module
 }
 
-/// A trampoline that can't run: replaced as soon as the module exists.
-unsafe extern "C" fn no_trampoline(_: *mut JitCtx, _: *mut Cpu, _: u32, _: u32, _: RegionCode) -> u32 {
-    unreachable!("the trampoline is compiled with the module")
+/// A signature in `module`'s default (C) calling convention.
+fn signature(module: &JITModule, params: &[Type], ret: Type) -> Signature {
+    let mut s = module.make_signature();
+    s.params.extend(params.iter().map(|&t| AbiParam::new(t)));
+    s.returns.push(AbiParam::new(ret));
+    s
+}
+
+/// A region's signature: (ctx, cpu, budget, entry block, steps done) ->
+/// steps | flags, in the `tail` convention (chained jumps are tail calls).
+fn region_signature(module: &JITModule) -> Signature {
+    let mut s = signature(module, &[I64, I64, I32, I32, I32], I32);
+    s.call_conv = CallConv::Tail;
+    s
 }
 
 impl Compiler {
     pub fn new() -> Self {
         let module = new_module();
-        assert_eq!(module.target_config().pointer_type(), I64, "the JIT needs a 64-bit host");
-        let sig = |params: &[Type], ret: Type| {
-            let mut s = module.make_signature();
-            s.params.extend(params.iter().map(|&t| AbiParam::new(t)));
-            s.returns.push(AbiParam::new(ret));
-            s
-        };
-        let mut block_sig = sig(&[I64, I64, I32, I32, I32], I32);
-        block_sig.call_conv = CallConv::Tail;
-        let mut compiler = Compiler {
-            block_sig,
-            trampoline_sig: sig(&[I64, I64, I32, I32, I64], I32),
-            trampoline: no_trampoline,
-            load_sig: sig(&[I64, I32], I64),
-            store_sig: sig(&[I64, I32, I32], I32),
-            exec_sig: sig(&[I64, I32, I32], I32),
+        Compiler {
+            block_sig: region_signature(&module),
+            load_sig: signature(&module, &[I64, I32], I64),
+            store_sig: signature(&module, &[I64, I32, I32], I32),
+            exec_sig: signature(&module, &[I64, I32, I32], I32),
             ctx: module.make_context(),
             fctx: FunctionBuilderContext::new(),
             module,
             code_bytes: 0,
-        };
-        compiler.trampoline = compiler.compile_trampoline();
-        compiler
+        }
     }
 
     /// Free all generated code. Every region handed out becomes invalid.
@@ -184,36 +182,7 @@ impl Compiler {
         // SAFETY: the caller has dropped every pointer into the old code.
         unsafe { old.free_memory() };
         self.code_bytes = 0;
-        self.trampoline = self.compile_trampoline();
     }
-
-    /// The [`Trampoline`]: calls the region with 0 steps done.
-    fn compile_trampoline(&mut self) -> Trampoline {
-        self.ctx.func = Function::with_name_signature(UserFuncName::default(), self.trampoline_sig.clone());
-        {
-            let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
-            let entry = b.create_block();
-            b.append_block_params_for_function_params(entry);
-            b.switch_to_block(entry);
-            let p = b.block_params(entry).to_vec();
-            let region_sig = b.import_signature(self.block_sig.clone());
-            let zero = b.ins().iconst(I32, 0);
-            let call = b.ins().call_indirect(region_sig, p[4], &[p[0], p[1], p[2], p[3], zero]);
-            let r = b.inst_results(call)[0];
-            b.ins().return_(&[r]);
-            b.seal_all_blocks();
-            b.finalize(self.module.target_config());
-        }
-        let id = self.module.declare_anonymous_function(&self.trampoline_sig).expect("declaring the trampoline");
-        self.module.define_function(id, &mut self.ctx).expect("compiling the trampoline");
-        self.module.clear_context(&mut self.ctx);
-        self.module.finalize_definitions().expect("finalizing the trampoline");
-        let code = self.module.get_finalized_function(id);
-        // SAFETY: built with `trampoline_sig`, the host's C calling
-        // convention for (pointer, pointer, u32, u32, pointer) -> u32.
-        unsafe { std::mem::transmute::<*const u8, Trampoline>(code) }
-    }
-
     /// Translate a region (`region[0]` is where it is entered) to host code.
     ///
     /// With the log target `jit_ir` at trace level (`--log-level
@@ -290,6 +259,46 @@ impl Compiler {
         self.module.clear_context(&mut self.ctx);
         self.module.finalize_definitions().map_err(|e| e.to_string())?;
         Ok((self.module.get_finalized_function(id), link_targets))
+    }
+}
+
+/// The [`Trampoline`], in a small code module of its own that is never
+/// freed: it stays valid across [`Compiler::reset`]s and whichever thread
+/// compiles the regions.
+pub(super) struct Trampolines {
+    _module: JITModule,
+    pub call: Trampoline,
+}
+
+impl Trampolines {
+    pub fn new() -> Self {
+        let mut module = new_module();
+        let sig = signature(&module, &[I64, I64, I32, I32, I64], I32);
+        let mut ctx = module.make_context();
+        let mut fctx = FunctionBuilderContext::new();
+        ctx.func = Function::with_name_signature(UserFuncName::default(), sig.clone());
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            let p = b.block_params(entry).to_vec();
+            let region_sig = b.import_signature(region_signature(&module));
+            let zero = b.ins().iconst(I32, 0);
+            let call = b.ins().call_indirect(region_sig, p[4], &[p[0], p[1], p[2], p[3], zero]);
+            let r = b.inst_results(call)[0];
+            b.ins().return_(&[r]);
+            b.seal_all_blocks();
+            b.finalize(module.target_config());
+        }
+        let id = module.declare_anonymous_function(&sig).expect("declaring the trampoline");
+        module.define_function(id, &mut ctx).expect("compiling the trampoline");
+        module.finalize_definitions().expect("finalizing the trampoline");
+        let code = module.get_finalized_function(id);
+        // SAFETY: built with `sig`, the host's C calling convention for
+        // (pointer, pointer, u32, u32, pointer) -> u32.
+        let call = unsafe { std::mem::transmute::<*const u8, Trampoline>(code) };
+        Trampolines { _module: module, call }
     }
 }
 
