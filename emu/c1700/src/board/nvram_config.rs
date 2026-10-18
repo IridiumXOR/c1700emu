@@ -27,6 +27,11 @@ const MAGIC_FEEDFACE: u32 = 0xFEED_FACE;
 /// `unk_FFF2F32C`): the prompt variable and the standard aliases.
 const DEFAULT_VARS: &[(&str, &str)] = &[("PS1", "rommon ! > ")];
 const DEFAULT_ALIASES: &[u8] = b"r\0repeat\0h\0history\0?\0help\0b\0boot\0ls\0dir\0i\0reset\0k\0stack\0\0";
+/// The other non-zero bytes of the ROM's default area (what it writes on a
+/// fresh NVRAM): the IOMEM percentage (`emt_iomem_get`, NVRAM byte 0x9F:
+/// 25%), and 0x13 at 0xCB (read through a structure offset; meaning not
+/// identified).
+const DEFAULT_BYTES: &[(usize, u8)] = &[(0x9F, 25), (0xCB, 0x13)];
 
 const IOS_HEADER: usize = 0x808;
 const IOS_MAGIC: u16 = 0xABCD;
@@ -124,6 +129,9 @@ fn reset_monitor_area(nv: &mut [u8]) {
         }
     }
     nv[MON_ALIASES..MON_ALIASES + DEFAULT_ALIASES.len()].copy_from_slice(DEFAULT_ALIASES);
+    for &(at, value) in DEFAULT_BYTES {
+        nv[at] = value;
+    }
     fix_monitor_checksum(nv);
 }
 
@@ -237,6 +245,7 @@ mod tests {
         assert_eq!(confreg(&nv), Some(0x2102));
         assert!(monitor_area_valid(&nv));
         assert_eq!(rommon_vars(&nv).unwrap(), [("PS1".to_string(), "rommon ! > ".to_string())]);
+        assert_eq!(nv[0x9F], 25, "the ROM's default IOMEM percentage");
         let set = |n: &str, v: &str| (n.to_string(), v.to_string());
         set_rommon_vars(&mut nv, &[set("IP_ADDRESS", "10.0.2.15"), set("TFTP_SERVER", "10.0.2.2")]).unwrap();
         set_rommon_vars(&mut nv, &[set("IP_ADDRESS", "10.0.2.16"), set("PS1", "")]).unwrap();
