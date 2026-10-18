@@ -156,6 +156,22 @@ impl Flash {
     pub fn peek8(&self, off: u32) -> u8 {
         self.storage().data[(off % self.size()) as usize]
     }
+
+    /// Reads at `off` return the array content (no ID, status or query
+    /// data), for all of its 4 KB page.
+    pub fn array_readable(&self, off: u32) -> bool {
+        match self {
+            Flash::Amd(f) => f.array_readable(),
+            Flash::Intel(f) => f.array_readable(off),
+        }
+    }
+
+    /// Where the byte at `off` is kept: reading there is reading the flash
+    /// while [`Flash::array_readable`] holds.
+    pub fn host_ptr(&mut self, off: u32) -> *mut u8 {
+        let size = self.size();
+        self.storage_mut().data[(off % size) as usize..].as_mut_ptr()
+    }
 }
 
 impl Drop for Flash {

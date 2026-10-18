@@ -93,6 +93,12 @@ impl AmdFlash {
         u16::from_be_bytes([self.read8(off), self.read8(off + 1)])
     }
 
+    /// Reads return the array everywhere: no chip is in autoselect (ID)
+    /// mode. (Programming and erasing change the array at once.)
+    pub fn array_readable(&self) -> bool {
+        !self.state.contains(&ChipState::Autoselect)
+    }
+
     pub fn write16(&mut self, off: u32, value: u16) {
         let [hi, lo] = value.to_be_bytes();
         self.write8(off & !1, hi);

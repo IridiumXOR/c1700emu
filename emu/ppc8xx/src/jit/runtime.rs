@@ -127,6 +127,7 @@ pub(super) struct JitCtx {
     pub tables: FastTables,
     /// Platform memory map and MMU state the tables were filled under.
     pub map_epoch: u64,
+    pub host_epoch: u64,
     pub mmu_generation: u64,
     /// Watched words reported written, not yet invalidated.
     pub code_writes: Vec<u32>,
@@ -158,6 +159,7 @@ impl JitCtx {
             fill: true,
             tables: FastTables::new(),
             map_epoch: 0,
+            host_epoch: 0,
             mmu_generation: 0,
             code_writes: Vec::new(),
             touched: false,
@@ -199,6 +201,7 @@ fn after_access<P: Platform>(ctx: &mut JitCtx, cpu: &Cpu, sys: &mut P) -> u32 {
     }
     let stop = !ctx.code_writes.is_empty()
         || sys.memory_map_epoch() != ctx.map_epoch
+        || sys.host_page_epoch() != ctx.host_epoch
         || cpu.mmu.data_generation() != ctx.mmu_generation
         || (cpu.msr & msr::EE != 0 && sys.external_interrupt());
     if stop { EXIT } else { OK }

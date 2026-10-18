@@ -385,6 +385,7 @@ impl Jit {
         self.ctx.code_writes.clear();
         self.ctx.tables.flush_all();
         self.ctx.map_epoch = sys.memory_map_epoch();
+        self.ctx.host_epoch = sys.host_page_epoch();
         self.ctx.mmu_generation = u64::MAX; // re-read at the next sync
         self.compiler.reset();
         self.stats.flushes += 1;
@@ -610,6 +611,12 @@ impl Jit {
             // address may have changed, code included.
             log::debug!(target: "jit", "memory map changed (epoch {} -> {epoch}) at pc={:#010x}: flushing all translations", self.ctx.map_epoch, cpu.pc);
             self.flush(sys);
+        }
+        let epoch = sys.host_page_epoch();
+        if epoch != self.ctx.host_epoch {
+            // Some memory read directly stopped being plain (flash command).
+            self.ctx.host_epoch = epoch;
+            self.ctx.tables.flush_all();
         }
         let generation = cpu.mmu.data_generation();
         if generation != self.ctx.mmu_generation {

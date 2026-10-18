@@ -86,9 +86,20 @@ pub trait Platform {
     /// stores to them go through `write*` and get checked.
     ///
     /// The pointer must stay valid until [`Platform::memory_map_epoch`]
+    /// changes, and can be read directly until [`Platform::host_page_epoch`]
     /// changes.
     fn host_page(&mut self, _pa: u32, _write: bool) -> Option<*mut u8> {
         None
+    }
+
+    /// Changes when a page [`Platform::host_page`] handed out may no longer
+    /// be accessed directly although the memory map is the same: memory
+    /// that is plain only in some device state, such as flash in read-array
+    /// mode (a command switches it to status or ID reads). The JIT drops
+    /// its direct pointers when it moves. Cheaper than a memory map change,
+    /// which also throws all translations away.
+    fn host_page_epoch(&self) -> u64 {
+        0
     }
 
     /// Changes whenever an answer of [`Platform::host_page`] may have changed

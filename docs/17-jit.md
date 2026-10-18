@@ -443,6 +443,7 @@ self-decompression; accelerators and idle detection off):
 | clock helpers inlined | **32.0** | **312.6** (93.8 s vs **9.6 s**) |
 | registers per guest block, comparisons feed branches (17.13) | | +1.5% (297.4 → 301.6 in one A/B session) |
 | chaining (17.14) | | +17% (301.1 → 352.9 in one A/B session) |
+| flash read directly (17.15) | | +17% (349.6 → 408.7 in one A/B session) |
 
 (Absolute numbers move by a few percent from one day to the next with
 the machine's state: the old binary gave 297-300 MIPS in the session of
@@ -678,24 +679,73 @@ the dispatcher's share of the time fell from 14% to 6%. IOS boots to
 `Router>` with `--idle off` in **32.0 s** (38.4 s before). The host code
 grew from 399 to 555 KB (frame pointers, the exit checks).
 
-## 17.15 What limits it, and next steps
+## 17.15 Step 12: reading flash directly
 
-`perf record -e cycles:u` of the benchmark (after 17.14):
+ROMMON copies the IOS image (21 MB) out of flash into RAM before booting
+it, and the benchmark's first ~600 million instructions are mostly that
+copy plus a checksum over it (chapter 22). Every flash read went through
+a helper, the interpreter's `load8`, the board's slow path and the flash
+model's `read16`: ~16% of the benchmark's time.
+
+In read-array mode the flash *is* memory: a read returns the array byte,
+exactly what the backing `Vec<u8>` holds. The only difficulty is that the
+mode changes. Any command (read ID, read status, program, erase) switches
+the bank to returning something else, and a direct pointer handed out
+earlier would keep returning the array.
+
+* The board's `host_page` now also hands out flash pages, for reads only
+  and only while their bank is in read-array mode. Writes always go
+  through the model, because on flash every write is a command.
+* A new `Platform::host_page_epoch` moves whenever a flash write takes a
+  bank **out of** read-array mode. It is the same idea as
+  `memory_map_epoch`, but cheaper: that one throws all translations away,
+  this one only empties the fast memory tables (`JitCtx::host_epoch`, as
+  for an MMU change). A store helper that moves it ends the region, so no
+  translated code runs between the command and the flush.
+* Programming a flash file needs one bump per session, not one per word:
+  once the bank is in status mode its pages aren't handed out, and the
+  `0xFF` (read array) at the end needs nothing; the next reads fill the
+  tables again.
+
+The AMD model (`--flash-size 4`) is readable unless a chip is in
+autoselect (ID) mode; its program and erase change the array at once, and
+direct readers see that like the model's own reads.
+
+**Tests.** `c1700/tests/flash_jit.rs` boots a 47-instruction synthetic
+ROM that maps the flash, then loops: sum 1 KB of flash, read the
+identifier (and a data address in ID mode), back to read-array, program a
+word, read the status and the programmed word. Interpreter, JIT and JIT
+in check mode must agree on all registers and on the flash contents;
+without the epoch bump the JIT reads array data in ID mode and the test
+fails. In IOS, `copy running-config flash:test.cfg`, `show flash:` and
+`more flash:test.cfg` work under the JIT, and the file is in the host's
+flash image afterwards.
+
+**Measured** (one A/B session): **349.6 → 408.7 MIPS** (+17%); the
+`--stats` output (instruction counts, exceptions, devices) is
+byte-identical before and after.
+
+With 17.13-17.15 together the JIT runs the benchmark at ~409 MIPS,
+**~12.8×** the interpreter (32 MIPS), and IOS reaches `Router>` with
+`--idle off` in **30.4 s** (interpreter: 217.8 s).
+
+## 17.16 What limits it, and next steps
+
+`perf record -e cycles:u` of the benchmark (after 17.15):
 
 | where | share |
 |---|---|
-| translated code | 49% |
-| reading flash through the device model (`IntelFlash::read16`, `read8_slow`, the `load8` helpers) | ~16% |
-| the interpreter (`execute`, `fetch`, `interpret`: tails at batch ends, helper instructions) | ~11% |
-| the dispatcher | 6% |
-| device and machine bookkeeping per batch (`advance`, `sipend`, `Machine::run`) | ~4% |
+| translated code | 59% |
+| the interpreter (`execute`, `fetch`, `interpret`: tails at batch ends, helper instructions) | ~15% |
+| the dispatcher (`run_batch`, `sync`) | ~9% |
+| device and machine bookkeeping per batch (`sipend`, `advance`, `Machine::run`) | ~6% |
 
-* **Flash reads.** ROMMON copies the 21 MB image out of flash byte by
-  byte through the flash device model. Reading flash directly while it is
-  in read-array mode needs a cheap way to invalidate just those
-  fast-table entries when a command changes the mode (it happens for
-  every word while programming).
 * **Tails**: a region only starts if its first block fits in what is
   left of the batch (256 instructions between device syncs), so the last
   instructions of almost every batch are interpreted: 1.1% of the
-  instructions, but ~11% of the time.
+  instructions, but ~15% of the time. Splitting a region's entry block at
+  the budget (or longer batches when no device needs attention) would
+  remove most of it.
+* **Per-batch bookkeeping**: the machine syncs the devices every 256
+  instructions; with the JIT that granularity costs more than the
+  instructions themselves in some loops.

@@ -97,6 +97,13 @@ The flash window only decodes as flash for `offset < size`. Above that the
 bus reads like an empty bank (see chapter 4: a mirrored window made ROMMON
 "find" eight banks and overflow its stack).
 
+For the JIT, a bank in read-array mode is plain memory: the board hands
+its pages out for direct reads (`host_page`), and a command that takes the
+bank out of read-array mode moves `host_page_epoch`, which makes the JIT
+forget them (chapter 17.15). The AMD model counts as readable unless a
+chip is in autoselect (ID) mode; its program and erase change the array
+at once, which direct readers see.
+
 ## 11.3 How ROMMON finds the image: the flash file system
 
 Chapter 8 showed the file header ROMMON writes after `tftpdnld`. To put an

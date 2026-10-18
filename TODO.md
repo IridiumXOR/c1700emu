@@ -24,11 +24,11 @@ Chapter references are to `docs/`.
       bare RETURN); `--idle warp` is back; a snapshot/idle-detection bug
       found on the way is fixed (chapter 21, tools/tests/warp_test.py).
 
-## JIT (chapter 17.15)
+## JIT (chapter 17.16)
 
-- [ ] 8. Read flash directly (ROMMON's copy of the 21 MB image is ~10% of
-      the benchmark); needs cheap invalidation when the flash leaves
-      read-array mode.
+- [x] 8. Flash read directly in read-array mode (`host_page` + a cheap
+      `host_page_epoch` that only empties the fast tables when a command
+      leaves read-array mode), +17%, chapter 17.15.
 - [x] 9. Cheaper compare-and-branch: a branch tests the comparison's
       result instead of re-reading the CR bit (chapter 17.13).
 - [x] 10. Guest registers stay in host registers within a guest block

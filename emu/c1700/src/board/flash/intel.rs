@@ -171,6 +171,11 @@ impl IntelFlash {
         }
     }
 
+    /// The bank holding `off` is in read-array mode.
+    pub fn array_readable(&self, off: u32) -> bool {
+        self.banks[self.locate(off).0].mode == Mode::ReadArray
+    }
+
     pub fn read8(&self, off: u32) -> u8 {
         let w = self.read16(off & !1);
         if off & 1 == 0 { (w >> 8) as u8 } else { w as u8 }

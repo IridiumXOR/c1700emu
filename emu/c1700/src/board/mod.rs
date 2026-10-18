@@ -108,6 +108,9 @@ pub struct Board {
     /// Pages holding JIT-translated code; every write to DRAM (CPU, DMA,
     /// debugger, accelerators) is checked against it.
     code: CodeWatch,
+    /// [`Platform::host_page_epoch`]: moves when a flash bank leaves
+    /// read-array mode (its pages may have been handed out for direct reads).
+    host_epoch: u64,
 }
 
 /// A physical address range whose accesses are logged, like a watchpoint.
@@ -155,6 +158,7 @@ impl Board {
             watch: None,
             idma_busy: false,
             code: CodeWatch::new(),
+            host_epoch: 0,
         }
     }
 
@@ -216,6 +220,18 @@ impl Board {
         if v.loading() {
             self.invalidate_map();
             self.code.clear();
+            self.host_epoch += 1;
+        }
+    }
+
+    /// A CPU write to the flash: a command, or data for one.
+    fn flash_write(&mut self, off: u32, write: impl FnOnce(&mut Flash)) {
+        let readable = self.flash.array_readable(off);
+        write(&mut self.flash);
+        if readable && !self.flash.array_readable(off) {
+            // `host_page` may have handed out pages of this bank for direct
+            // reads, which would now read the array instead of status or ID.
+            self.host_epoch += 1;
         }
     }
 
@@ -535,7 +551,7 @@ impl Board {
                 self.run_cpm();
                 self.update_irq();
             }
-            Region::Flash { base } => self.flash.write8(base + low, value),
+            Region::Flash { base } => self.flash_write(base + low, |f| f.write8(base + low, value)),
             Region::IoBus { base } => {
                 self.io.write8(base + low, value);
                 self.update_irq();
@@ -562,7 +578,7 @@ impl Board {
                 self.run_cpm();
                 self.update_irq();
             }
-            Region::Flash { base } => self.flash.write16(base + low, value),
+            Region::Flash { base } => self.flash_write(base + low, |f| f.write16(base + low, value)),
             Region::IoBus { .. } => {
                 let [a, b] = value.to_be_bytes();
                 self.write8(addr, a)?;
@@ -590,10 +606,10 @@ impl Board {
                 self.run_cpm();
                 self.update_irq();
             }
-            Region::Flash { base } => {
-                self.flash.write16(base + low, (value >> 16) as u16);
-                self.flash.write16(base + low + 2, value as u16);
-            }
+            Region::Flash { base } => self.flash_write(base + low, |f| {
+                f.write16(base + low, (value >> 16) as u16);
+                f.write16(base + low + 2, value as u16);
+            }),
             Region::IoBus { .. } => {
                 for (i, b) in value.to_be_bytes().into_iter().enumerate() {
                     self.write8(addr + i as u32, b)?;
@@ -711,8 +727,15 @@ impl Platform for Board {
                 Some(self.dram[bank as usize][offset as usize..].as_mut_ptr())
             }
             Region::Rom { base } if !write => Some(self.rom[(base + page_offset) as usize..].as_mut_ptr()),
+            // Flash reads like memory while in read-array mode (until a
+            // command moves `host_epoch`); writes are always commands.
+            Region::Flash { base } if !write && self.flash.array_readable(base + page_offset) => Some(self.flash.host_ptr(base + page_offset)),
             _ => None,
         }
+    }
+
+    fn host_page_epoch(&self) -> u64 {
+        self.host_epoch
     }
 
     fn memory_map_epoch(&self) -> u64 {

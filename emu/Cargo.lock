@@ -131,6 +131,7 @@ dependencies = [
  "log",
  "lz4_flex",
  "powerpc",
+ "powerpc-asm",
  "ppc8xx",
  "smoltcp",
  "tftp-packet",

@@ -88,6 +88,9 @@ impl<P: Platform> Platform for Recorder<'_, P> {
     fn memory_map_epoch(&self) -> u64 {
         self.inner.memory_map_epoch()
     }
+    fn host_page_epoch(&self) -> u64 {
+        self.inner.host_page_epoch()
+    }
     fn watch_code(&mut self, pa: u32, len: u32) -> Option<u32> {
         self.inner.watch_code(pa, len)
     }
