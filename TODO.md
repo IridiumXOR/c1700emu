@@ -16,7 +16,8 @@ Chapter references are to `docs/`.
       without cards.
 - [x] 4. The 5 boot-time machine checks: deliberate probes past the end
       of RAM and flash, faithful (chapter 19.3).
-- [ ] 5. `--aux-tcp` (AUX port over telnet) never tested with IOS.
+- [x] 5. `--aux-tcp`: IOS's AUX line (`aux 0`) gives a second exec session
+      (chapter 7).
 - [x] 6. Snapshots (`Ctrl-] s`, `--restore`; IOS at `Router#` in 0.3 s)
       and ELF core dumps for GDB (`Ctrl-] d`), chapter 20.
 - [ ] 7. Warp idle mode made IOS's console go silent and was removed; cause

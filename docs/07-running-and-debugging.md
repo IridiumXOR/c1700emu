@@ -71,6 +71,20 @@ emulated 16550.
 With `--tcp 2323`: `telnet localhost 2323`. In telnet, `Ctrl-]` then
 `send brk` sends a BREAK. Scripts can use plain sockets (send `\r` for Enter).
 
+**The AUX port** (DUART channel B, IOS line `aux 0`) gets its own telnet
+port with `--aux-tcp 2324`. IOS runs an exec on it by default, so pressing
+Enter there gives a second `Router>` session next to the console. Checked
+with IOS 12.4(8), from the AUX session:
+
+```
+Router>show users
+    Line       User       Host(s)              Idle       Location
+   0 con 0                idle                 00:01:17
+*  5 aux 0                idle                 00:00:00
+```
+
+and from the console, `show line` lists `5 AUX 9600/9600` as active.
+
 Piping works too, handy for automation:
 
 ```bash
