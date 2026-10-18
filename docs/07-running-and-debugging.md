@@ -24,9 +24,13 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 
 | Option | Meaning |
 |--------|---------|
-| `--rom PATH` | ROM image (default `roms/CISCO_bootrom_AT27C040.bin`) |
+| `--config FILE` | read options from a TOML file; the command line overrides it (7.7) |
+| `--rom PATH\|builtin` | ROM image (default `roms/CISCO_bootrom_AT27C040.bin`), or `builtin`: the emulator's own boot ROM, which boots the first image in flash with no ROM monitor (chapter 24) |
 | `--nvram PATH` | NVRAM file, created if missing, saved every 2 s and on exit |
 | `--flash PATH` | flash image file (default `c1700-flash.bin`): loaded at start, guest writes saved back |
+| `--rommon-var NAME=VALUE` | (repeatable) set a ROMMON variable in NVRAM before booting (7.7) |
+| `--startup-config FILE` | install a text IOS startup-config in NVRAM before booting (7.7) |
+| `--nvram-info` | print the NVRAM's configuration register, ROMMON variables and startup-config, then exit without touching the file (7.7) |
 | `--model M` | chassis 1720 (default), 1721, 1750, 1751, 1760: sets the cookie's mainboard PM ID (chapter 11) |
 | `--serial S` | processor board serial in the cookie, Cisco format `LLLYYWWSSSS` (default for a new NVRAM `EMU1234C170`; chapter 4) |
 | `--flash-size MB` | internal flash: 4 (2 × AMD Am29F016), 8, 16, 32 (Intel 28F640J3/28F128J3 x16); default 32 for 1751/1760, else 16 |
@@ -41,7 +45,7 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--serial0 udp:LPORT:RHOST:RPORT[,dce]`, `--serial0-1`, `--serial1`, `--serial1-1` | cable the first (second) serial port of the card in slot 0 (1) to another emulator, one HDLC frame per datagram; a V.35 DTE cable, or DCE with `,dce`; without it: no cable |
 | `--restore FILE` | start from a snapshot instead of power-on (chapter 20) |
 | `--snapshot FILE` / `--core FILE` | where `Ctrl-] s` saves a snapshot and `Ctrl-] d` an ELF core dump (defaults `c1700.snap`, `c1700-core.elf`) |
-| `--cpu interp\|jit` | CPU engine: the interpreter (default, the reference) or the JIT (chapter 17) |
+| `--cpu interp\|jit\|jit-check` | CPU engine: the interpreter (default, the reference), the JIT (chapter 17), or the JIT checked against the interpreter after every region (17.12) |
 | `--jit-threshold N` | JIT: times a block runs interpreted before it is translated (default 50) |
 | `--ram MB` | SDRAM size, split into power-of-two banks (default 32) |
 | `--board-id N` | CPLD board-type strap |
@@ -54,10 +58,11 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--profile-dump FILE` | with `--profile`: write every sampled PC (whole run and `Ctrl-] p` window) |
 | `--no-stdio` | don't use the terminal (TCP only) |
 | `--gdb PORT` | wait for GDB before the first instruction |
-| `-n N` | stop after N instructions |
+| `-n N`, `--max-instructions N` | stop after N instructions |
+| `--stats` | at exit, print what the guest used: exceptions, on-chip registers, unknown devices |
 | `--trace` | log every instruction (use with `--log`, very verbose) |
 | `--profile` | per-address execution counts of the ROM, plus PC samples over all addresses (whole run and the window since `Ctrl-] p`), printed at exit |
-| `--log PATH`, `--log-level L` | logging (`RUST_LOG` also works, e.g. `RUST_LOG=c1700emu::board=debug`) |
+| `--log PATH`, `--log-level L` | logging: a level (`warn` by default) and per-target levels, e.g. `warn,net=debug,scc=debug`, or `syscall=debug` for IOS's calls into the ROM monitor (chapter 24); `RUST_LOG` also works |
 
 ## 7.2 The console
 
@@ -169,10 +174,31 @@ after its guest address (`guest_8000a488`) in `perf report` (chapter 17.18).
 
 ```bash
 cd emu
-cargo test --release                       # everything
-cargo test --release -p c1700emu           # boots the ROM; tftpdnld to RAM and flash, autoboot
+cargo test --release                       # everything (about a minute)
+cargo test --release -p c1700emu           # the board: ROM boot, tftpdnld, JIT + GDB, built-in ROM...
 QEMU_DIFF_SEQUENCES=20000 cargo test --release -p ppc8xx --test qemu_diff
 ```
+
+| test | what it checks |
+|---|---|
+| `ppc8xx/tests/semantics.rs` | 48 focused tests: carries, overflow, rotates, branches, string ops, exceptions, 8xx special registers (chapter 5) |
+| `ppc8xx/tests/qemu_diff.rs` | random instruction sequences give the same state in our interpreter, in `qemu-ppc` and in the JIT (needs `qemu-ppc-static`, `llvm-mc`, `ld.lld`; skipped without them) |
+| `ppc8xx/tests/mmu.rs` | TLB misses refilled by real reload handlers through the table-walk assist (chapter 12) |
+| `ppc8xx/tests/jit.rs` | the JIT ends in exactly the interpreter's state: exceptions and interrupts, self-modifying code, the MMU, chaining, the background compiler (chapter 17) |
+| `c1700/tests/boot.rs` | the real ROM boots to the prompt and answers commands; boot from flash |
+| `c1700/tests/net.rs` | `tftpdnld -r`, `tftpdnld` to flash, power cycle, autoboot (chapter 8) |
+| `c1700/tests/flash_jit.rs` | the JIT's direct flash reads stop when a flash command changes the read mode (17.15) |
+| `c1700/tests/scc_loopback.rs` | the SCC's HDLC engine in local loopback, no IOS (chapter 23) |
+| `c1700/tests/gdb_jit.rs` | GDB with the JIT: breakpoints in translated code, single steps, patches (7.3, 17.20) |
+| `c1700/tests/fakerom.rs` | the built-in boot ROM boots a tiny image that talks to it through EMT calls and reloads (chapter 24) |
+
+Tests that need the boot ROM skip themselves (with a message) when `roms/`
+is missing. The end-to-end scripts that run full IOS sessions are in
+`tools/tests/` (README §11): `startup_config_test.sh` (7.7),
+`fakerom_test.sh` (chapter 24), `serial_test.sh` and `serial_2t_test.sh`
+(chapter 23), `tap_test.sh` (chapter 18), `warp_test.py` and
+`exec_timeout_test.py` (chapter 21). `tools/bench.sh [--cpu jit]` is the
+speed benchmark (chapter 16).
 
 ## 7.5b Why is the boot so quiet?
 

@@ -411,7 +411,7 @@ The most used options (all of them: `c1700emu --help`, and
 |---|---|
 | `emu/ppc8xx/` | the PowerPC (MPC8xx) core: interpreter, MMU, JIT (Cranelift) |
 | `emu/c1700/` | the board and the `c1700emu` program: MPC860 devices, CPLD, flash, NVRAM, UART, FEC, SCC, WIC cards, networking, snapshots |
-| `docs/` | 23 chapters on how it was all found and built ([index](docs/README.md), [summary](docs/00-summary.md)) |
+| `docs/` | 25 chapters on how it was all found and built ([index](docs/README.md), [summary](docs/00-summary.md)) |
 | `tools/` | helper scripts: IOS sessions, image tools, IDA annotation scripts, tests, benchmark |
 | `TODO.md` | the work list |
 | `*.pdf` | reference manuals (MPC860 user's manual, Cisco documents) |

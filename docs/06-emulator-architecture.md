@@ -3,12 +3,21 @@
 ```
 emu/                        Cargo workspace
 ├── ppc8xx/                 the CPU core (no Cisco knowledge at all)
-│   ├── src/lib.rs          state, Platform trait, exceptions, SPRs, timebase, step()
+│   ├── src/lib.rs          state, Platform trait, exceptions, SPRs, timebase, step(), run_batch()
 │   ├── src/execute.rs      one match arm per opcode; the load/store funnel
 │   ├── src/decode_cache.rs memo of decoded instruction words
 │   ├── src/mmu.rs          the 8xx MMU: TLBs, table-walk assist, protection (ch. 12)
+│   ├── src/state.rs        CPU state for snapshots (ch. 20)
+│   ├── src/jit/            the second CPU engine, Cranelift (ch. 17)
+│   │   ├── mod.rs          dispatcher, block cache, regions, chaining, stats
+│   │   ├── scan.rs         which instructions form a block / region
+│   │   ├── codegen.rs      guest instructions → Cranelift IR → host code
+│   │   ├── runtime.rs      context block, fast memory tables, helpers called from code
+│   │   ├── watch.rs        code watch: which pages hold translated code (self-modifying code)
+│   │   ├── worker.rs       background compiler thread (ch. 17.17)
+│   │   └── check.rs        --cpu jit-check: every region verified by the interpreter (ch. 17.12)
 │   ├── examples/decode_bench.rs
-│   └── tests/              semantics, MMU end-to-end, differential vs qemu-ppc, throughput
+│   └── tests/              semantics, MMU end-to-end, differential vs qemu-ppc, JIT vs interpreter, throughput
 └── c1700/                  the Cisco board
     ├── src/mpc860/         on-chip peripherals (IMMR window)
     │   ├── mod.rs          SIU (interrupts), memory controller/UPM, PIT, RSR,
@@ -17,22 +26,30 @@ emu/                        Cargo workspace
     │   └── fec.rs          Fast Ethernet Controller registers + LXT971 PHY
     ├── src/board/          what is soldered around the chip
     │   ├── mod.rs          chip-select decoder, Platform impl, --watch
-    │   ├── iobus.rs        CS7 sub-decoder: NVRAM, IO FPGA, DUART (console + AUX)
-    │   ├── uart16550.rs    nvram.rs  cookie.rs (model, serial)  cpld.rs (IO FPGA)
+    │   ├── iobus.rs        CS7 sub-decoder: NVRAM, IO FPGA, DUART (console + AUX), slots
+    │   ├── uart16550.rs    nvram.rs  cookie.rs (model, serial)  cpld.rs (IO FPGA, ch. 19)
+    │   ├── nvram_config.rs what ROMMON and IOS keep in NVRAM: confreg, variables, startup-config (ch. 7.7)
     │   ├── fpga_config.rs  IO FPGA reg 0x4C: Xilinx slave-serial port (1760, ch. 11)
     │   ├── flash/          amd.rs, intel.rs (x16 StrataFlash), mod.rs (persistence)
     │   ├── flashfs.rs      Cisco flash file system (--flash-file, ch. 11)
     │   ├── fec_dma.rs      the FEC's DMA engine (descriptor rings, ch. 8)
-    │   ├── cpm_spi.rs      CPCR commands + SPI controller (WIC ID EEPROMs, ch. 10)
+    │   ├── cpm_spi.rs      CPCR commands + SPI controller (WIC ID EEPROMs, ch. 10, 23)
+    │   ├── scc.rs          the SCCs in HDLC mode: what the WIC serial ports run on (ch. 23)
+    │   ├── wic.rs          WIC-1T / WIC-2T cards: ID EEPROM, modem pins, cables (ch. 23)
     │   └── idma.rs         IDMA memory-to-memory copies (IOS receive path, ch. 13)
-    ├── src/net/            virtual network: smoltcp host + TFTP server
+    ├── src/net/            mod.rs: virtual network (smoltcp host), tftp.rs: TFTP server,
+    │                       host.rs: TAP devices and UDP tunnels (ch. 18)
     ├── src/fastforward.rs  skips the ROM's timebase busy-wait loops
-    ├── src/machine.rs      CPU + board + virtual clock + reset logic + stats
+    ├── src/idle.rs         IOS idle detection and realtime pacing (ch. 15, 21)
+    ├── src/fakerom.rs      --rom builtin: the emulator's own boot ROM, EMT calls (ch. 24)
+    ├── src/machine.rs      CPU + board + virtual clock + reset logic + hooks + stats
+    ├── src/snapshot.rs     snapshots (ch. 20)    coredump.rs  ELF core dumps (ch. 20)
     ├── src/emulator.rs     machine + consoles, the interactive loop
     ├── src/console.rs      terminal (raw mode) and telnet servers (console, AUX)
+    ├── src/wakeup.rs       wakes the emulation loop from other threads (input, network)
     ├── src/gdb.rs          GDB stub (gdbstub crate)
-    ├── src/main.rs         command line (clap)
-    └── tests/              boot.rs (ROM → prompt, boot from flash), net.rs (tftpdnld)
+    ├── src/main.rs         command line (clap), --config files
+    └── tests/              ROM boot, tftpdnld, flash + JIT, SCC loopback, GDB + JIT, built-in ROM
 ```
 
 ## 6.1 Why two crates?

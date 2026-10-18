@@ -15,7 +15,7 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 4 | [Hardware map](04-hardware-map.md) | chip selects, IMMR peripherals used, board devices (UART, NVRAM, CPLD, flash) |
 | 5 | [CPU core](05-cpu-core.md) | the `ppc8xx` interpreter, 8xx quirks, differential testing vs QEMU |
 | 6 | [Emulator architecture](06-emulator-architecture.md) | crates, `Platform` boundary, bus decoding, virtual clock, devices |
-| 7 | [Running & debugging](07-running-and-debugging.md) | command line, console, GDB stub, tracing |
+| 7 | [Running & debugging](07-running-and-debugging.md) | command line, console, GDB stub (also with the JIT), tracing, tests, `--config` files and what NVRAM keeps (confreg, ROMMON variables, startup-config) |
 | 8 | [Network boot & flash](08-network-and-flash.md) | FEC DMA, virtual network + TFTP server, Cisco image format, flash file system, PIT clock, fast-forward |
 | 9 | [Checking IOS images](09-ios-images.md) | why `file` says "MIPS-X", proving images are MPC8xx code, `-mz` = loader + ZIP |
 | 10 | [Towards full IOS emulation](10-ios-roadmap.md) | what IOS uses that is still missing, with the evidence for each item |
@@ -25,7 +25,7 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 14 | [Speed and JIT](14-speed-and-jit.md) | where an interpreter spends its time, how a JIT works, what it would take here, the plan |
 | 15 | [Profiling and idle detection](15-profiling-and-idle.md) | guest and host profiles, how IOS idles, the idle-PC detector, results |
 | 16 | [Making the interpreter faster](16-interpreter-optimisations.md) | the benchmark, each optimisation with its measured effect, exact ROM accelerators, what is left |
-| 17 | [A JIT compiler](17-jit.md) | `--cpu jit`: Cranelift translation of hot blocks, exactness rules, self-modifying code, verification (incl. mutation testing), results |
+| 17 | [A JIT compiler](17-jit.md) | `--cpu jit`: Cranelift translation of hot blocks, exactness rules, self-modifying code, verification (incl. mutation testing), regions, chaining, background compiling, `--cpu jit-check`, breakpoints as hooks; ~700 MIPS |
 | 18 | [Real networks](18-real-networks.md) | `--net tap:`/`udp:`: TAP devices, UDP tunnels between emulators (two IOS routers pinging), `--mac` |
 | 19 | [Slots, IO FPGA, machine checks](19-slots-iofpga-machine-checks.md) | the WIC/VIC slot windows and their presence test, the IO FPGA registers IOS uses, why every boot takes five machine checks |
 | 20 | [Snapshots and core dumps](20-snapshots-and-core-dumps.md) | `Ctrl-] s` / `--restore`: the whole machine in 0.2 s, IOS at `Router#` in 0.3 s; `Ctrl-] d`: ELF core files for GDB |

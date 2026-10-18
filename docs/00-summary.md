@@ -19,16 +19,23 @@ chapter with the full story.
 | Boot an IOS image from the internal flash, no TFTP (`--flash-file`) | ✅ ([chapter 11](11-internal-flash-and-models.md)) |
 | Router model 1720/1721/1750/1751/1760 (`--model`, cookie PM ID) | ✅ |
 | Intel StrataFlash x16 (28F640J3/28F128J3, 8–32 MB), as on real boards | ✅ (AMD pair still available) |
-| GDB remote debugging | ✅ |
+| GDB remote debugging, also with the JIT (breakpoints are JIT hooks) | ✅ breakpoint in IOS reached in 6.6 s with the JIT, 124 s with the interpreter ([chapters 7.3](07-running-and-debugging.md), [17.20](17-jit.md)) |
 | CPU verified against QEMU (100 000 random instruction sequences) | ✅ |
 | Real IOS 12.3(11)T2: `tftpdnld -r` → self-decompress → IOS setup dialog | ✅ ~6.5 min ([chapter 9](09-ios-images.md)) |
-| Real IOS 12.4(8) on a 1760, from internal flash → `Router>`; `show version/interfaces/diag/flash:` | ✅ ~4.8 min ([chapter 10](10-ios-roadmap.md)); FastEthernet0/0 detected, link up |
+| Real IOS 12.4(8) on a 1760, from internal flash → `Router>`; `show version/interfaces/diag/flash:` | ✅ ([chapter 10](10-ios-roadmap.md)); FastEthernet0/0 detected, link up. Now 153 s in the default realtime mode, 19.7 s with `--cpu jit --idle off` |
 | IOS networking: ARP + `ping 10.0.2.2` from IOS to the virtual host | ✅ `.!!!!` ([chapter 13](13-ios-networking.md)): FEC + IDMA + MMU |
 | Idle detection + interpreter fast paths: idle router ~0% host CPU, interpreter +47% | ✅ IOS boot to `Router>` 318 → 153 s ([chapters 15](15-profiling-and-idle.md), [16](16-interpreter-optimisations.md)) |
 | 8xx MMU (ITLB/DTLB, table-walk assist, protection, TLB exceptions) | ✅ IOS boots with translation on ([chapter 12](12-mmu.md)) |
 | Snapshots (`Ctrl-] s`, `--restore`) and ELF core dumps (`Ctrl-] d`) | ✅ IOS at `Router#` 0.3 s after start instead of ~150 s ([chapter 20](20-snapshots-and-core-dumps.md)) |
-| JIT compiler as a second CPU engine (`--cpu jit`, Cranelift) | ✅ ~9.8× the interpreter on the benchmark, CPU-bound IOS boot 217.8 → 38.4 s, same results ([chapter 17](17-jit.md)) |
+| JIT compiler as a second CPU engine (`--cpu jit`, Cranelift), lockstep check mode (`--cpu jit-check`) | ✅ ~700 vs ~36 MIPS on the benchmark (~19×), CPU-bound IOS boot (`--idle off`) 197 → 19.7 s, same results ([chapter 17](17-jit.md)) |
 | Network bridge to the real LAN | ✅ TAP devices and UDP tunnels (`--net`); two emulated routers ping each other ([chapter 18](18-real-networks.md)) |
+| WIC/VIC slots, IO FPGA registers, the five boot-time machine checks explained | ✅ deliberate probes of empty slots ([chapter 19](19-slots-iofpga-machine-checks.md)) |
+| `--idle warp`: idle time skipped with no wall-clock limit, console still answering | ✅ ([chapter 21](21-warp-and-the-silent-console.md)) |
+| Why ROMMON writes next to its own code | ✅ it builds and runs code on its stack ([chapter 22](22-rommon-code-on-the-stack.md)) |
+| WAN cards: WIC-1T and WIC-2T serial ports, two routers over HDLC (`--wic0`, `--serial0`) | ✅ line protocol up, pings both ways, DTE/DCE ([chapter 23](23-wic-1t-serial.md)) |
+| Configuration files (`--config`), boot options and IOS startup-config written into NVRAM, `--nvram-info` | ✅ ([chapter 7.7](07-running-and-debugging.md)) |
+| A boot ROM of our own (`--rom builtin`): IOS boots without Cisco's ROM | ✅ 24.7 s sooner to `Router>` in realtime mode ([chapter 24](24-fake-boot-rom.md)) |
+| Hidden ROMMON and IOS commands and menus (`priv`, diagnostic `menu`, `MONRC`, `service internal`, parser flags) | ✅ ([chapter 25](25-hidden-commands.md)) |
 
 ## 2. Quick start
 
@@ -64,7 +71,18 @@ gdb -ex "set architecture powerpc:common" -ex "set endian big" -ex "target remot
 ```
 
 `set endian big` is required: without an ELF file GDB can't know the byte
-order and shows every register byte-swapped.
+order and shows every register byte-swapped. Add `--cpu jit` to debug at
+the JIT's speed (chapter 7.3).
+
+### Options in a file
+
+```bash
+emu/target/release/c1700emu --config tools/examples/c1760-ios.toml
+```
+
+Every command-line option can go into a TOML file (`model = "1760"`,
+`confreg = "0x2102"`, `startup-config = "router.cfg"`...); the command line
+overrides it. Details: [chapter 7.7](07-running-and-debugging.md).
 
 ### Network boot and flash
 
@@ -179,9 +197,12 @@ is its only local boot device. Details: [chapter 11](11-internal-flash-and-model
 ```text
 emu/
 ├── ppc8xx/   PowerPC core of the MPC860: state, exceptions, SPRs, timebase,
-│             instruction semantics. Decoding via the `powerpc` crate.
-└── c1700/    MPC860 peripherals (mpc860/), board devices (board/), FEC DMA,
-              virtual network (net/), machine loop, console, GDB stub, CLI
+│             MMU, instruction semantics (decoding via the `powerpc` crate),
+│             and the JIT (jit/, Cranelift)
+└── c1700/    MPC860 peripherals (mpc860/), board devices (board/: flash,
+              NVRAM, FEC DMA, SCC, WIC cards...), networks (net/), machine
+              loop, idle detection, snapshots, built-in ROM, console, GDB
+              stub, CLI (module map: chapter 6)
 ```
 
 Main decisions:
@@ -189,8 +210,12 @@ Main decisions:
 * **Own interpreter in Rust** rather than Unicorn: the 8xx special
   registers, exceptions delivered to the ROM's own vectors, bus-error
   machine checks and timers all need exact behaviour.
+* **Two CPU engines.** The interpreter stays the reference; the JIT
+  (Cranelift) must end in exactly the same state, which random
+  differential tests and the `--cpu jit-check` lockstep mode verify.
 * **Existing crates** wherever possible: `powerpc` (decoder and
-  disassembler), `gdbstub`, `smoltcp`, `tftp-packet`, `crc32fast`, `clap`,
+  disassembler), `cranelift` (JIT), `gdbstub`, `smoltcp`, `tftp-packet`,
+  `tun-tap`, `crc32fast`, `lz4_flex` (snapshots), `toml`, `clap`,
   `crossterm`, `env_logger`.
 * **`Platform` trait** between the CPU and the board, following the boundary
   on the silicon. The CPU is tested on its own against QEMU.
@@ -213,51 +238,70 @@ Main decisions:
 | Decompiler showed `g_cookie[128]` | a stale label from an address I had mis-converted (`-2147457820` = 0x800064E4) | check the raw instruction (`lwz r9, 0x6464(r9)`) |
 | Boot slower than the CPU benchmark | decoding opcode-31 instructions took 42 ns (linear table scan) | memo cache keyed by the instruction word |
 | Flash write took ~70 s | half the time in the ROM's `mftb` busy-wait loops | fast-forward the clock through them (exact, never past an interrupt): ~4 s |
+| The JIT threw away 70% of its translations | ROMMON builds small code sequences on its stack and runs them, next to translated code ([chapter 22](22-rommon-code-on-the-stack.md)) | watch translated code per word, not per page |
+| Two cabled routers said their serial line was "looped" | both emulators are deterministic and ran cycle for cycle alike, so both sent the same keepalive "magic" (a counter plus the uptime), and each IOS took the other's keepalive for its own coming back ([chapter 23](23-wic-1t-serial.md)) | identical copies of a deterministic machine need something different (the tests use different keepalive periods) |
+| GDB breakpoints made IOS debugging 20× slower | any breakpoint switched the JIT off | a breakpoint is just one more address where translated code must stop ([chapter 17.20](17-jit.md)) |
 
 ## 6. Performance
 
-* CPU core alone: ~108 MIPS. Full board: ~28 MIPS.
-* Boot to the prompt: **5.2 s** (6.9 s without fast-forward). What's left is
-  mostly the ROM's byte-by-byte RAM clear; `--ram 16` halves it.
+* CPU engines (`tools/bench.sh`, power-on to 3 billion instructions with
+  IOS in flash): interpreter **~36 MIPS**, JIT **~700 MIPS**
+  ([chapters 16](16-interpreter-optimisations.md), [17](17-jit.md)).
+* Power-on to `rommon 1 >`: **0.07 s** (the RAM clear and the delay loops
+  are accelerated; the first version took 5.2 s).
+* IOS 12.4(8) to `Router>`: **153 s** in the default realtime mode, where
+  the router's clock keeps the wall clock's pace; **19.7 s** with
+  `--cpu jit --idle off`; **0.3 s** from a snapshot ([chapter 20](20-snapshots-and-core-dumps.md)).
+* An idle router uses ~0% of a host CPU (idle detection, [chapter 15](15-profiling-and-idle.md));
+  a ping through a TAP device takes ~0.3 ms.
 * Writing an image to flash: **~4 s** after answering `y`.
-* `--profile` prints the hottest ROM addresses. That is how both speedups
-  were found.
+* `--profile` prints the hottest guest addresses; with the JIT,
+  `C1700_PERF_MAP=1 perf record` names the translated code (chapter 7.4).
 
 ## 7. Verification
 
 | Test | What it proves |
 |------|----------------|
-| `ppc8xx/tests/qemu_diff.rs` | random instruction sequences give the same registers in our CPU and in `qemu-ppc` (400 per run by default, 100 000 checked) |
+| `ppc8xx/tests/qemu_diff.rs` | random instruction sequences give the same registers in our CPU and in `qemu-ppc` (400 per run by default, 100 000 checked), and the same state in the JIT |
 | `ppc8xx/tests/semantics.rs` | 48 focused tests: carries, overflow, rotates, branches, string ops, exceptions, 8xx special registers |
-| `c1700/tests/boot.rs` | the real ROM boots to the prompt and answers `meminfo` and `dev` |
-| `c1700/tests/net.rs` | TFTP boot from RAM, write to flash, power-cycle, autoboot from flash |
-| unit tests | cookie checksum, flash commands, flash file persistence |
+| `ppc8xx/tests/mmu.rs`, `jit.rs` | the MMU with real TLB reload handlers; the JIT against the interpreter (exceptions, self-modifying code, chaining...) |
+| `c1700/tests/boot.rs`, `net.rs` | the real ROM boots to the prompt and answers commands; TFTP boot from RAM, write to flash, power-cycle, autoboot |
+| `c1700/tests/flash_jit.rs`, `scc_loopback.rs`, `gdb_jit.rs`, `fakerom.rs` | direct flash reads, the SCC's HDLC engine, GDB with the JIT, the built-in ROM |
+| unit tests | cookie checksum, flash commands and persistence, NVRAM layouts, config files, snapshots... |
+| `tools/tests/*` | full IOS sessions: startup-config, built-in ROM, serial links, TAP, warp, console after logout |
 
-Run everything with `cd emu && cargo test --release` (about 30 s).
+Run everything with `cd emu && cargo test --release` (about a minute);
+the table with every test is in [chapter 7.5](07-running-and-debugging.md).
 
 ## 8. Tools
 
 | File | Purpose |
 |------|---------|
 | `tools/ida/mpc860_setup.py` | IDA: IMMR segment and `IMMR_t` struct, vector table, SPR comments |
-| `tools/ida/c1700_names.py` | IDA: 77 functions and 12 globals named, typed and commented, with the evidence |
+| `tools/ida/c1700_names.py` | IDA: the ROM's functions and globals named, typed and commented, with the evidence |
+| `tools/ida/ios_124_8_names.py` | IDA: the same for the decompressed IOS 12.4(8) (drivers, scheduler, EMT wrappers, parser keywords) |
 | `tools/ida/decompile.py` | headless IDA (idalib): decompile, disassemble, apply scripts, save |
 | `tools/find_refs.py` | finds code that builds an address with `lis`+`addi` (who uses this string?) |
 | `tools/mkimage.py` | builds a minimal bootable C1700 image that prints a message |
 | `tools/ciscoimg.py` | checks a real IOS image like the ROM does (header, trailer, checksums), unzips it, identifies the CPU ([chapter 9](09-ios-images.md)) |
+| `tools/iosdis.py`, `tools/ios_refs.py` | disassemble a decompressed IOS image; find a string and the code that loads its address |
+| `tools/xbit.py` | parse the Xilinx bitstream IOS loads into the 1760's FPGA ([chapter 11](11-internal-flash-and-models.md)) |
+| `tools/ios_session.py`, `tools/rommon_session.py` | drive IOS / ROMMON unattended: boot, type commands, record the output |
+| `tools/ios_hidden_commands.py` | list what `service internal` reveals ([chapter 25](25-hidden-commands.md)) |
+| `tools/gdb_sample.py` | where is the guest stuck? interrupt it under GDB and dump registers and code |
+| `tools/bench.sh` | the CPU engine benchmark ([chapter 16](16-interpreter-optimisations.md)) |
+| `tools/tests/` | end-to-end IOS tests (startup-config, built-in ROM, serial, TAP, warp, exec timeout) |
+| `tools/examples/` | an annotated `--config` file and a startup-config |
 
 The annotated database is `roms/CISCO_bootrom_AT27C040.bin.i64` (in the
 private `c1700emu-roms` repository, see §2).
 
 ## 9. Next steps
 
-* **IOS**: reach the router from the host (bridge/port forward, telnet in),
-  the slot registers (0x68030000/40000/80000/B0000) and WIC cards (SCC/HDLC),
-  the remaining small inaccuracies (5 machine checks),
-  and snapshots to skip the ~5-minute boot
-  ([chapter 10](10-ios-roadmap.md)).
-* **Bridge to the host network** (e.g. UDP NAT) to TFTP from a real server.
-* **Interpreter speed**: a fast path for instruction fetch.
+The work list is [`TODO.md`](../TODO.md) at the top of the repository.
+Open now: a monitor prompt for the built-in ROM (`boot`, `confreg`, the
+BOOT variable, `tftpdnld`), its last unimplemented EMT calls, and other
+IOS images ([chapter 24.5](24-fake-boot-rom.md)).
 * More CPLD registers, and the remaining ROMMON commands (`xmodem`, `dnld`)
   tested.
 

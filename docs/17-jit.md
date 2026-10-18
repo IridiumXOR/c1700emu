@@ -937,3 +937,57 @@ What remains is the plain cost of the guest code: each guest instruction
 becomes 2-10 host instructions, and a memory access ~10 (table lookup,
 byte swap). Going further would mean a different design (translating
 whole loops with their memory accesses hoisted), which isn't planned.
+
+## 17.20 Breakpoints and GDB
+
+At first a GDB breakpoint switched the JIT off: `Machine::run` saw a
+non-empty breakpoint set and took the interpreter's per-instruction path,
+which compares every PC with the set. Debugging IOS was then ~20 times
+slower than running it (124 s to reach a breakpoint in the scheduler
+loop instead of a few seconds).
+
+The JIT already knows how to stop before an address: the **hooks**
+(delay-loop fast-forward, idle detection, the built-in ROM's entry
+points, chapter 24) are addresses where the machine must run its own code
+before the guest instruction. The block scanner ends a block before any
+address for which the caller's `stop_before(pc)` says yes (17.9), and the
+dispatcher returns to `Machine::run` instead of entering a region that
+starts there. Breakpoints became one more kind of hook:
+
+```rust
+// machine.rs, jit_batch: hooks, plus the breakpoints when there are any
+jit.run_batch(&mut self.cpu, &mut self.board, max, |pc|
+    is_hook(ff, idle, builtin, pc) || (!bps.is_empty() && bps.contains(&pc)))
+```
+
+`Machine::run` then handles the stop: it sees that the PC is a breakpoint,
+syncs the devices and reports `StopReason::Breakpoint` to the GDB stub,
+exactly as with the interpreter. Three details make it exact:
+
+* **Old translations.** Code translated before a breakpoint was set does
+  not end before it: a region could run straight through the new
+  breakpoint. So whenever the set of breakpoints differs from the one the
+  translations were made with (`jit_breakpoints`), `run` flushes the JIT
+  first. GDB removes and re-inserts its breakpoints around stops and
+  steps, so after a `continue` the hot code is usually translated again,
+  in the background (17.17) while the interpreter runs it.
+* **Continuing from a breakpoint.** The first instruction after a stop is
+  executed by the interpreter without the check
+  (`ignore_breakpoint_at_start`), then translated code resumes.
+* **Single steps and memory writes.** A step is one interpreted
+  instruction. A write from GDB (`M` packet, `set *(int*)addr = ...`)
+  goes through the board like a guest store, so the code watch (17.7)
+  drops the translation of a patched instruction.
+
+With the interpreter (`--cpu interp`) breakpoints still send `run` down
+the per-instruction path, as before: making them interpreter hooks too
+would be possible, but the JIT is the engine to debug IOS with.
+
+Result: from power-on with `--idle off` to a breakpoint on IOS's
+scheduler loop head (0x80617648), **6.6 s with the JIT, 124 s with the
+interpreter**. `c1700/tests/gdb_jit.rs` speaks the GDB remote protocol to
+the real stub: it waits until a small loop runs as translated code, then
+checks that a breakpoint inside it stops on every iteration, that a
+single step executes one instruction, and that an instruction patched
+from GDB is what runs next. The user-facing side is chapter 7.3.
+
