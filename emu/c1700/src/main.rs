@@ -9,6 +9,8 @@
 //! c1700emu --gdb 1234                   # wait for GDB before the first instruction
 //! c1700emu --model 1760 --ram 128 --flash-file roms/c1700-adventerprisek9-mz.124-8.bin --confreg 0x2102
 //!                                        # IOS in the internal flash, ROMMON boots it
+//! c1700emu --rom builtin --model 1760 --ram 128 --flash-file roms/c1700-adventerprisek9-mz.124-8.bin
+//!                                        # the same without Cisco's boot ROM (docs ch. 24)
 //! c1700emu --trace --log trace.txt -n 2000000   # instruction trace of the first 2M instructions
 //! ```
 
@@ -16,6 +18,7 @@ use c1700emu::board::wic::WicKind;
 use c1700emu::board::{BoardConfig, cookie, flashfs, nvram::Nvram, nvram_config};
 use c1700emu::console::Console;
 use c1700emu::emulator::Emulator;
+use c1700emu::fakerom;
 use c1700emu::gdb;
 use c1700emu::machine::{CpuEngine, Machine};
 use c1700emu::net::host::HostLink;
@@ -38,7 +41,9 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Boot ROM image (512 KB AT27C040 dump).
+    /// Boot ROM image (512 KB AT27C040 dump), or `builtin`: the emulator's
+    /// own minimal boot ROM, which boots the first image in flash without
+    /// a ROM monitor (docs ch. 24).
     #[arg(long, default_value = "roms/CISCO_bootrom_AT27C040.bin")]
     rom: PathBuf,
 
@@ -375,8 +380,13 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
 
-    let rom_path = find_file(&args.rom);
-    let rom = std::fs::read(&rom_path).map_err(|e| format!("cannot read ROM {}: {e}", rom_path.display()))?;
+    let builtin_rom = args.rom.as_os_str() == "builtin";
+    let rom = if builtin_rom {
+        fakerom::image()
+    } else {
+        let rom_path = find_file(&args.rom);
+        std::fs::read(&rom_path).map_err(|e| format!("cannot read ROM {}: {e}", rom_path.display()))?
+    };
 
     let net = (args.net == NetChoice::Virtual && !args.no_net).then(|| NetConfig {
         server_ip: args.net_server_ip,
@@ -418,6 +428,9 @@ fn main() -> Result<(), String> {
 
 
     let mut machine = Machine::new(rom, &cfg, nvram);
+    if builtin_rom {
+        machine.use_builtin_rom();
+    }
     // Input threads (network, console) wake the emulation loop from idle sleeps.
     let wakeup = Wakeup::default();
     let host_link = match &args.net {

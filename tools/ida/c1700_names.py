@@ -164,7 +164,9 @@ FUNCS = [
     (0xFFF0336C, "exc_MachineCheck_unused", None, None) if False else (0xFFF0369C, "exc_MachineCheck", None, None),
     (0xFFF037D0, "exc_External", None, None),
     (0xFFF03904, "exc_Decrementer", None, "stage 1: stash SRR0/1 in SPRG2/3, rfi to stage 2 (0xFFF03948)"),
-    (0xFFF0338C, "exc_Syscall", None, None),
+    (0xFFF0338C, "exc_Syscall", None,
+     "`sc` from a booted image (IOS's EMT calls, docs ch. 24): the RAM vector 0xC00 jumps here; saves the context, "
+     "calls emt_dispatch(r3, r4, r5, r6) and returns its result in r3 with rfi"),
     (0xFFF03A38, "exc_Unexpected", None, "shared by every vector without a dedicated handler"),
     # ---- found while chasing JIT code invalidations (docs ch. 17.10, 22) ----
     (0xFFF21C44, "checksum16_oc", "int __fastcall checksum16_oc(int sum, unsigned short *buf, int len);",
@@ -182,6 +184,47 @@ FUNCS = [
      "dcache_flush_all + icache_invalidate_all: what real hardware needs before running freshly written code"),
     (0xFFF03F40, "dcache_flush_all", "void dcache_flush_all(void);", "sync, then flush every D-cache line through DC_CST/DC_ADR"),
     (0xFFF03EB8, "icache_invalidate_all", "void icache_invalidate_all(void);", "IC_CST = invalidate all (0x0C << 24), isync"),
+    # ROM monitor calls ("EMT" calls) a booted image makes: docs ch. 24, which
+    # the emulator's built-in boot ROM (--rom builtin, emu/c1700/src/fakerom.rs)
+    # answers the same way.
+    (0xFFF161E8, "emt_dispatch", "int __fastcall emt_dispatch(int n, char *a, int b, int c);",
+     "switch over the EMT number: 1 putc, 2 -> 0xC00, 3/20 getchar, 4 memsize, 6 ~NVRAM confreg, 7 platform 0x33, "
+     "8 reload (boot_data reason 9, then cmd_reset), 10 banner, 13 &boot_data, 24 NVRAM size, 25 'C1700', 26 boot info, "
+     "28 confreg, 33 cookie, 34/35 image string, 36/37 version string, 44 copy cookie, 45/46 monitor variables, "
+     "47 -> 0x800, 59/60 IOMEM %, 61/62 console speed, 71/72 NVRAM byte 0xA0; the 'EMT police' ones and the rest -> -1. "
+     "Hex-Rays prints some buffer addresses as negative numbers: -2147454368 = 0x80007260 g_boot_info, "
+     "-2147454252 = 0x800072D4 g_image_string, -2147454628 = 0x8000715C g_version_string"),
+    (0xFFF0BD10, "emt_putc", "int __fastcall emt_putc(char c);",
+     "EMT 1: console output, LF -> CR LF; tracks the column and pages (--More--) when g_monitor_flags & 4"),
+    (0xFFF0BCE0, "emt_getchar", "int emt_getchar(void);", "EMT 3/20: wait for a console character (7 bits, not NUL)"),
+    (0xFFF1013C, "emt_memsize", "int __fastcall emt_memsize(int a, int b, int c);",
+     "EMT 4: main memory size; the first call sizes it and clears RAM from 0x8000 up"),
+    (0xFFF1056C, "emt_nvram_size", "int emt_nvram_size(void);", "EMT 24: NVRAM size, probed once (0x8000 on a 1700)"),
+    (0xFFF1067C, "emt_iomem_get", "int emt_iomem_get(void);", "EMT 60: IOMEM percentage, NVRAM byte 0x9F"),
+    (0xFFF1068C, "emt_iomem_set", "int __fastcall emt_iomem_set(char percent);",
+     "EMT 59: IOMEM percentage into the monitor area copy (NVRAM 0x9F), then monitor_area_sync"),
+    (0xFFF0C24C, "emt_console_baud_get", "int emt_console_baud_get(void);",
+     "EMT 62: console speed from the NVRAM confreg (console_baud_table)"),
+    (0xFFF0C28C, "emt_console_baud_set", "int __fastcall emt_console_baud_set(int baud);",
+     "EMT 61: put a console_baud_table speed into the NVRAM confreg's bits 12-11/5; -1 if not a table speed or no valid confreg"),
+    (0xFFF0AC7C, "emt_monvar_set", "int __fastcall emt_monvar_set(const char *assignment);",
+     "EMT 45: \"NAME=VALUE\" into g_monitor_vars (NULL: only ask), monitor_area_sync, return 768 minus the bytes used"),
+    (0xFFF0ACD4, "emt_monvar_get", "int __fastcall emt_monvar_get(const char *name, char *buf, int size);",
+     "EMT 46: copy a variable's value: its length, -1 unset, -2 longer than size"),
+    (0xFFF0A914, "monvar_set", "int __fastcall monvar_set(char *area, int size, const char *assignment);", None),
+    (0xFFF0A870, "monvar_lookup", "char *__fastcall monvar_lookup(char *area, const char *name);", "pointer to the value or NULL"),
+    (0xFFF0AB70, "monvar_list_end", "char *__fastcall monvar_list_end(char *area);", "the NUL ending a NAME, NUL, VALUE, NUL... list"),
+    (0xFFF0B9D0, "monitor_area_sync", "int monitor_area_sync(void);",
+     "checksum the RAM copy of the monitor area, nvram_write 0x5C6 bytes of it to NVRAM 0x94 (docs ch. 7.7)"),
+    (0xFFF0B8BC, "monitor_area_checksum", None, "the checksum word at NVRAM 0x658 makes the 16-bit sum of the area 0"),
+    (0xFFF0D2E8, "boot_data_set", "int __fastcall boot_data_set(int reason, _DWORD *context);",
+     "boot_data = {19 (BOOT_COUNT), reason, PC, address} from the saved exception context; reasons as IOS prints them: "
+     "0 power-on, 1 abort, 2 breakpoint, 3 exit trap, 4 trace trap, 5 emt, 6 bus error, 7 address error, 8 watchdog, "
+     "9 reload, 0xA/0xB parity, 0xC unexpected interrupt, 0xD write bus error"),
+    (0xFFF22D08, "loadprog", None, "boot an image: read the ELF from the boot device, check e_machine against "
+     "g_platform_code, copy the allocated sections to RAM and launch_image it"),
+    (0xFFF03CA4, "launch_image", None, "save the ROM's context, then jump to the image: r3 = 2, r4 = 0, r5 = parameter block, "
+     "r6 = entry, LR = back into the ROM (the state measured in docs ch. 24)"),
 ]
 
 for ea, name, proto, cmt in FUNCS:
@@ -212,6 +255,18 @@ GLOBALS = [
     (0x800064E4, "g_cookie", "unsigned char g_cookie[132];", "RAM copy of the NVRAM cookie (magic, 128 B data, checksum)"),
     (0xFFF2FCAC, "cookie_field_table", None, "u16 count, ptr to 12-byte {name, len, nvals, value-names} descriptors"),
     (0xFFF2FE64, "flash_device_table", None, "20-byte entries {u16 mandev, u16, u32 chip size, u32 sector size, char* name, u32 flags}"),
+    # RAM copy of the NVRAM from 0x90 (confreg) on: the monitor area (docs ch. 7.7, 24)
+    (0x80006574, "g_confreg", "unsigned short g_confreg;", "RAM copy of NVRAM 0x90; EMT 28 returns it"),
+    (0x80006578, "g_monitor_area", None, "RAM copy of the NVRAM monitor area 0x94..0x65A (1478 bytes), monitor_area_sync writes it back"),
+    (0x80006583, "g_iomem_percent", "unsigned char g_iomem_percent;", "NVRAM 0x9F (EMT 59/60)"),
+    (0x80006584, "g_nvram_byte_a0", "unsigned char g_nvram_byte_a0;", "NVRAM 0xA0 (EMT 71 reads NVRAM, EMT 72 sets this copy)"),
+    (0x800065AC, "g_boot_data", "unsigned int g_boot_data[20];", "NVRAM 0xC8: {19, reason, PC, address}; EMT 13 returns its address"),
+    (0x8000662C, "g_monitor_vars", "char g_monitor_vars[768];", "NVRAM 0x148: ROMMON variables NAME, NUL, VALUE, NUL... (EMT 45/46)"),
+    (0x80006D54, "g_exception_context", None, "CPU state saved by exceptions and soft resets (boot_data_set's source)"),
+    (0x80007100, "g_version_string_set", "char g_version_string_set;", "EMT 37 stores its string once"),
+    (0x8000715C, "g_version_string", "char g_version_string[257];", "EMT 36/37"),
+    (0x80007260, "g_boot_info", None, "EMT 26: {3 (flash), \"flash:NAME\"} of the booted file"),
+    (0x800072D4, "g_image_string", "char g_image_string[257];", "EMT 34/35"),
 ]
 # An early version of this script put g_cookie at 0x800063E4 (I mis-converted
 # -2147457820); the real buffer is at 0x800064E4. Drop the stale name.

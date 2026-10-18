@@ -7,6 +7,7 @@
 //! the difference, and it keeps the inner loop tight.
 
 use crate::board::{Board, BoardConfig, nvram::Nvram};
+use crate::fakerom;
 use crate::fastforward::FastForward;
 use crate::idle::{Idle, IdleMode};
 use crate::mpc860::rsr;
@@ -58,6 +59,8 @@ pub enum StopReason {
 }
 
 pub struct Machine {
+    /// `--rom builtin`: the emulator's own minimal boot ROM (docs ch. 24).
+    pub fake_rom: Option<Box<fakerom::FakeRom>>,
     pub cpu: Cpu,
     pub board: Board,
     pub breakpoints: BTreeSet<u32>,
@@ -109,6 +112,7 @@ const PROFILE_WORDS: usize = 0x8_0000 / 4;
 impl Machine {
     pub fn new(rom: Vec<u8>, cfg: &BoardConfig, nvram: Nvram) -> Self {
         let mut m = Machine {
+            fake_rom: None,
             cpu: Cpu::new(),
             board: Board::new(rom, cfg, nvram),
             breakpoints: BTreeSet::new(),
@@ -156,9 +160,19 @@ impl Machine {
         v.u32(&mut self.resets);
         self.idle.visit_state(v);
         self.fast_forward.visit_state(v);
+        if let Some(rom) = &mut self.fake_rom {
+            rom.visit_state(v);
+        }
         if v.loading() {
             self.flush_jit();
         }
+    }
+
+    /// Boot with the built-in minimal ROM (`--rom builtin`, docs ch. 24)
+    /// instead of running ROM code: the board must have been built with
+    /// [`fakerom::image`].
+    pub fn use_builtin_rom(&mut self) {
+        self.fake_rom = Some(Box::default());
     }
 
     /// Select the CPU engine.
@@ -217,7 +231,8 @@ impl Machine {
         let mut done = 0;
         while done < budget {
             let pc = self.cpu.pc;
-            if slow || is_hook(&self.fast_forward, &self.idle, pc) || (bp_hooks && self.breakpoints.contains(&pc)) {
+            let builtin = self.fake_rom.is_some();
+            if slow || is_hook(&self.fast_forward, &self.idle, builtin, pc) || (bp_hooks && self.breakpoints.contains(&pc)) {
                 // One instruction at a time, with the per-address hooks.
                 match self.before_step(pc, check_bp && !(done == 0 && ignore_breakpoint_at_start)) {
                     Hook::Run => {}
@@ -246,7 +261,7 @@ impl Machine {
                     self.jit_batch(max)
                 } else {
                     let (ff, idle) = (&self.fast_forward, &self.idle);
-                    self.cpu.run_batch(&mut self.board, max, |pc| is_hook(ff, idle, pc))
+                    self.cpu.run_batch(&mut self.board, max, |pc| is_hook(ff, idle, builtin, pc))
                 };
                 done += n;
                 self.unsynced += n;
@@ -268,9 +283,9 @@ impl Machine {
     /// interpreter 4% slower even when not used (measured).
     #[inline(never)]
     fn jit_batch(&mut self, max: u64) -> (u64, BatchEnd) {
-        let (ff, idle, bps) = (&self.fast_forward, &self.idle, &self.breakpoints);
+        let (ff, idle, bps, builtin) = (&self.fast_forward, &self.idle, &self.breakpoints, self.fake_rom.is_some());
         let jit = self.jit.as_mut().expect("JIT engine selected");
-        jit.run_batch(&mut self.cpu, &mut self.board, max, |pc| is_hook(ff, idle, pc) || (!bps.is_empty() && bps.contains(&pc)))
+        jit.run_batch(&mut self.cpu, &mut self.board, max, |pc| is_hook(ff, idle, builtin, pc) || (!bps.is_empty() && bps.contains(&pc)))
     }
 
     /// The per-instruction hooks, run before executing the instruction at `pc`.
@@ -278,6 +293,18 @@ impl Machine {
         if check_bp && self.breakpoints.contains(&pc) {
             self.sync_devices();
             return Hook::Stop(StopReason::Breakpoint(pc));
+        }
+        if let Some(rom) = self.fake_rom.as_mut().filter(|_| fakerom::is_hook(pc)) {
+            return match rom.entry(pc, &mut self.cpu, &mut self.board) {
+                fakerom::Action::Run => Hook::Run,
+                fakerom::Action::Again => Hook::Again,
+                fakerom::Action::Reload => {
+                    // like ROMMON's EMT 8: a checkstop reset, RAM kept
+                    self.hard_reset(rsr::CSRS);
+                    Hook::Again
+                }
+                fakerom::Action::Halt => Hook::Stop(StopReason::Checkstop),
+            };
         }
         if self.trace {
             self.trace_instruction(pc);
@@ -635,14 +662,22 @@ fn sample_report(title: &str, samples: &HashMap<u32, u64>) -> String {
 }
 
 /// Is there a per-address hook at `pc`: one of the ROM's delay loops or its
-/// memory clear (when the accelerators are on), the idle anchor or an
-/// auto-mode candidate? Ordinary code pays for the page tests only; the
+/// memory clear (when the accelerators are on), an entry point of the
+/// built-in ROM (`--rom builtin`), the idle anchor or an auto-mode
+/// candidate? Ordinary code pays for the page tests only; the
 /// exact address is compared on the few pages that have hooks (docs ch. 16.4, 17.6).
 #[inline(always)]
-fn is_hook(ff: &FastForward, idle: &Idle, pc: u32) -> bool {
+fn is_hook(ff: &FastForward, idle: &Idle, builtin_rom: bool, pc: u32) -> bool {
     let page = pc >> 12;
-    if page == 0xFFF12 || page == 0xFFF16 {
-        return ff.is_hook(pc);
+    // The ROM's hooks (one comparison for code outside the ROM, i.e. IOS):
+    // the accelerated loops of the real ROM, the built-in ROM's entry points.
+    if page >= 0xFFF00 {
+        if page == 0xFFF12 || page == 0xFFF16 {
+            return ff.is_hook(pc);
+        }
+        if builtin_rom && fakerom::is_hook(pc) {
+            return true;
+        }
     }
     idle.hook_pages.contains(&page) && (idle.anchor == Some(pc) || idle.is_candidate(pc))
 }

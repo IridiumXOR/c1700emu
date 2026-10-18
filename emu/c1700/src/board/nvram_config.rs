@@ -112,6 +112,18 @@ pub fn set_rommon_vars(nv: &mut [u8], assignments: &[(String, String)]) -> Resul
     Ok(())
 }
 
+/// Set one byte of the monitor area (such as the IOMEM percentage at 0x9F,
+/// which IOS changes through a ROM monitor call) and keep the area valid,
+/// as the ROM's sync does (docs ch. 24).
+pub fn set_monitor_byte(nv: &mut [u8], offset: usize, value: u8) {
+    assert!((MON_MAGIC + 4..MON_CHECKSUM).contains(&offset), "{offset:#x} is not in the monitor area");
+    if !monitor_area_valid(nv) {
+        reset_monitor_area(nv);
+    }
+    nv[offset] = value;
+    fix_monitor_checksum(nv);
+}
+
 /// A fresh monitor area as the ROM makes it when it finds the area corrupt.
 fn reset_monitor_area(nv: &mut [u8]) {
     nv[MON_MAGIC..MON_END].fill(0);
