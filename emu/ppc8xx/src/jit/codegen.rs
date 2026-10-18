@@ -26,6 +26,18 @@
 //! compare). On a hit the access is one host load or store; on a miss, a
 //! helper runs the interpreter's access function, which handles devices,
 //! misaligned accesses and faults exactly like the interpreter.
+//!
+//! **Chaining.** Every exit to a known address outside the region has a
+//! [`Link`]: once the dispatcher has filled it in, the exit jumps straight
+//! into the region there (a tail call) while the link is current and the
+//! next block fits in the budget; otherwise it returns to the dispatcher.
+//! A computed branch (`blr`, `bctr`) has a link too, remembering the last
+//! target it was filled in for: it is used when the branch goes there
+//! again (a one-entry inline cache: a loop calling a function returns to
+//! the same place every time).
+//! Regions use Cranelift's `tail` calling convention for that; the
+//! dispatcher calls them through a small C-convention [`Trampoline`]
+//! (docs ch. 17.14).
 
 use super::runtime::{EXCEPTION, EXIT, FastEntry, Helpers, JitCtx, TABLE_ENTRIES};
 use super::scan::{Block as GuestBlock, Kind};
@@ -33,6 +45,7 @@ use crate::Cpu;
 use crate::execute::mask;
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::ir::types::{I8, I16, I32, I64};
 use cranelift_codegen::ir::{AbiParam, Block, Function, InstBuilder, JumpTableData, MemFlagsData, SigRef, Signature, Type, UserFuncName, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -41,8 +54,40 @@ use cranelift_module::{Module, default_libcall_names};
 use powerpc::{Ins, Opcode};
 use std::mem::offset_of;
 
-/// A translated region: `(ctx, cpu, budget, entry block) -> steps | flags`.
-pub(super) type BlockFn = unsafe extern "C" fn(*mut JitCtx, *mut Cpu, u32, u32) -> u32;
+/// A translated region's code: `(ctx, cpu, budget, entry block, steps done
+/// before) -> steps | flags`, in Cranelift's `tail` calling convention, so
+/// only callable from generated code.
+pub(super) type RegionCode = *const u8;
+
+/// Calls a region from Rust: `(ctx, cpu, budget, entry block, region) ->
+/// steps | flags`, starting from 0 steps.
+pub(super) type Trampoline = unsafe extern "C" fn(*mut JitCtx, *mut Cpu, u32, u32, RegionCode) -> u32;
+
+/// The link of one region exit (see the module docs). The generated code
+/// reads it; the dispatcher fills it in.
+#[repr(C)]
+pub(super) struct Link {
+    /// The region to jump to, valid while `epoch == JitCtx::chain_epoch`.
+    pub func: RegionCode,
+    pub epoch: u64,
+    /// Its entry block for `target`, and that block's length (it must fit
+    /// in the budget).
+    pub entry: u32,
+    pub len: u32,
+    /// The guest address this exit goes to (for a computed branch: went to
+    /// when the link was filled in).
+    pub target: u32,
+    /// A computed branch: the dispatcher may fill the link in for any target.
+    pub computed: bool,
+}
+
+impl Link {
+    /// Never current: `chain_epoch` only counts up from 0.
+    pub const UNUSED: Link = Link { func: std::ptr::null(), epoch: u64::MAX, entry: 0, len: 0, target: 0, computed: false };
+}
+
+/// Most links one guest block needs: a conditional branch has two exits.
+pub(super) const LINKS_PER_BLOCK: usize = 2;
 
 /// Set in a region's result when its last executed instruction raised an
 /// exception (stored in `JitCtx::exception`, its address in `fault_pc`).
@@ -82,6 +127,9 @@ pub(super) struct Compiler {
     ctx: Context,
     fctx: FunctionBuilderContext,
     block_sig: Signature,
+    trampoline_sig: Signature,
+    /// The trampoline of the current module.
+    pub trampoline: Trampoline,
     load_sig: Signature,
     store_sig: Signature,
     exec_sig: Signature,
@@ -90,9 +138,16 @@ pub(super) struct Compiler {
 }
 
 fn new_module() -> JITModule {
-    let builder = JITBuilder::with_flags(&[("opt_level", "speed"), ("enable_verifier", "false")], default_libcall_names())
+    // Frame pointers: Cranelift's x86-64 tail calls (chaining) need them.
+    let flags = [("opt_level", "speed"), ("enable_verifier", "false"), ("preserve_frame_pointers", "true")];
+    let builder = JITBuilder::with_flags(&flags, default_libcall_names())
         .expect("Cranelift cannot generate code for this host");
     JITModule::new(builder)
+}
+
+/// A trampoline that can't run: replaced as soon as the module exists.
+unsafe extern "C" fn no_trampoline(_: *mut JitCtx, _: *mut Cpu, _: u32, _: u32, _: RegionCode) -> u32 {
+    unreachable!("the trampoline is compiled with the module")
 }
 
 impl Compiler {
@@ -105,8 +160,12 @@ impl Compiler {
             s.returns.push(AbiParam::new(ret));
             s
         };
-        Compiler {
-            block_sig: sig(&[I64, I64, I32, I32], I32),
+        let mut block_sig = sig(&[I64, I64, I32, I32, I32], I32);
+        block_sig.call_conv = CallConv::Tail;
+        let mut compiler = Compiler {
+            block_sig,
+            trampoline_sig: sig(&[I64, I64, I32, I32, I64], I32),
+            trampoline: no_trampoline,
             load_sig: sig(&[I64, I32], I64),
             store_sig: sig(&[I64, I32, I32], I32),
             exec_sig: sig(&[I64, I32, I32], I32),
@@ -114,15 +173,45 @@ impl Compiler {
             fctx: FunctionBuilderContext::new(),
             module,
             code_bytes: 0,
-        }
+        };
+        compiler.trampoline = compiler.compile_trampoline();
+        compiler
     }
 
-    /// Free all generated code. Every [`BlockFn`] handed out becomes invalid.
+    /// Free all generated code. Every region handed out becomes invalid.
     pub fn reset(&mut self) {
         let old = std::mem::replace(&mut self.module, new_module());
         // SAFETY: the caller has dropped every pointer into the old code.
         unsafe { old.free_memory() };
         self.code_bytes = 0;
+        self.trampoline = self.compile_trampoline();
+    }
+
+    /// The [`Trampoline`]: calls the region with 0 steps done.
+    fn compile_trampoline(&mut self) -> Trampoline {
+        self.ctx.func = Function::with_name_signature(UserFuncName::default(), self.trampoline_sig.clone());
+        {
+            let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            let p = b.block_params(entry).to_vec();
+            let region_sig = b.import_signature(self.block_sig.clone());
+            let zero = b.ins().iconst(I32, 0);
+            let call = b.ins().call_indirect(region_sig, p[4], &[p[0], p[1], p[2], p[3], zero]);
+            let r = b.inst_results(call)[0];
+            b.ins().return_(&[r]);
+            b.seal_all_blocks();
+            b.finalize(self.module.target_config());
+        }
+        let id = self.module.declare_anonymous_function(&self.trampoline_sig).expect("declaring the trampoline");
+        self.module.define_function(id, &mut self.ctx).expect("compiling the trampoline");
+        self.module.clear_context(&mut self.ctx);
+        self.module.finalize_definitions().expect("finalizing the trampoline");
+        let code = self.module.get_finalized_function(id);
+        // SAFETY: built with `trampoline_sig`, the host's C calling
+        // convention for (pointer, pointer, u32, u32, pointer) -> u32.
+        unsafe { std::mem::transmute::<*const u8, Trampoline>(code) }
     }
 
     /// Translate a region (`region[0]` is where it is entered) to host code.
@@ -130,17 +219,24 @@ impl Compiler {
     /// With the log target `jit_ir` at trace level (`--log-level
     /// warn,jit_ir=trace`) every region is logged three times: guest code,
     /// Cranelift IR, and the host code Cranelift generated.
-    pub fn compile(&mut self, region: &[GuestBlock]) -> Result<BlockFn, String> {
+    ///
+    /// `links` has room for [`LINKS_PER_BLOCK`] links per block, at a
+    /// stable address; the generated code reads them from there. Returns
+    /// the code and the target address of each link used, in order (`None`
+    /// for computed branches).
+    pub fn compile(&mut self, region: &[GuestBlock], links: *mut Link) -> Result<(RegionCode, Vec<Option<u32>>), String> {
         let dump = log::log_enabled!(target: "jit_ir", log::Level::Trace);
         self.ctx.set_disasm(dump);
         self.ctx.func = Function::with_name_signature(UserFuncName::default(), self.block_sig.clone());
+        let link_targets;
         {
             let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
             let params = b.block_params(entry).to_vec();
-            let (ctx, cpu, budget, entry_index) = (params[0], params[1], params[2], params[3]);
+            let (ctx, cpu, budget, entry_index, done) = (params[0], params[1], params[2], params[3], params[4]);
+            let sig_region = b.import_signature(self.block_sig.clone());
             let sig_load = b.import_signature(self.load_sig.clone());
             let sig_store = b.import_signature(self.store_sig.clone());
             let sig_exec = b.import_signature(self.exec_sig.clone());
@@ -164,11 +260,16 @@ impl Compiler {
                 cr_cache: [None; 8],
                 labels: Vec::new(),
                 stubs: Vec::new(),
+                sig_region,
+                links,
+                link_capacity: LINKS_PER_BLOCK * region.len(),
+                link_targets: Vec::new(),
             };
-            t.region(region, entry_index);
+            t.region(region, entry_index, done);
             t.emit_stubs();
             t.b.seal_all_blocks();
             t.b.finalize(self.module.target_config());
+            link_targets = t.link_targets;
         }
         let ir = if dump { self.ctx.func.display().to_string() } else { String::new() };
         let id = self.module.declare_anonymous_function(&self.block_sig).map_err(|e| e.to_string())?;
@@ -188,10 +289,7 @@ impl Compiler {
         self.code_bytes += self.ctx.compiled_code().map_or(0, |c| c.code_info().total_size as usize);
         self.module.clear_context(&mut self.ctx);
         self.module.finalize_definitions().map_err(|e| e.to_string())?;
-        let code = self.module.get_finalized_function(id);
-        // SAFETY: the function was built with `block_sig`, which is the
-        // host's C calling convention for (pointer, pointer, u32, u32) -> u32.
-        Ok(unsafe { std::mem::transmute::<*const u8, BlockFn>(code) })
+        Ok((self.module.get_finalized_function(id), link_targets))
     }
 }
 
@@ -271,6 +369,13 @@ struct Tx<'a> {
     /// Guest block start → (its Cranelift block, its length).
     labels: Vec<(u32, Block, u32)>,
     stubs: Vec<(Block, Stub)>,
+    /// Regions' own signature, for chained jumps.
+    sig_region: SigRef,
+    /// This region's links (`link_capacity` of them), and the target of
+    /// each one used so far.
+    links: *mut Link,
+    link_capacity: usize,
+    link_targets: Vec<Option<u32>>,
 }
 
 impl Tx<'_> {
@@ -497,13 +602,13 @@ impl Tx<'_> {
     // The region
     // ------------------------------------------------------------------
 
-    fn region(&mut self, region: &[GuestBlock], entry_index: Value) {
+    fn region(&mut self, region: &[GuestBlock], entry_index: Value, done: Value) {
         for block in region {
             let label = self.b.create_block();
             self.labels.push((block.start, label, block.insns.len() as u32));
         }
-        let zero = self.c(0);
-        self.b.def_var(self.steps, zero);
+        // Steps count from those done by the regions chained before this one.
+        self.b.def_var(self.steps, done);
         // Jump to the entry block: a jump table indexed by `entry`. Every
         // edge needs its own BlockCall (the SSA builder appends variable
         // arguments to each), so the default target gets a separate one.
@@ -566,10 +671,54 @@ impl Tx<'_> {
                 return self.finish(next, total);
             }
         }
+        self.chain(target, total);
+    }
+
+    /// Leave the region for `target` (outside it) through the exit's
+    /// [`Link`]: straight into the region there if the link is current (and
+    /// for a computed target, made for this address) and that block fits in
+    /// the budget, else back to the dispatcher, telling it which link to
+    /// fill in.
+    fn chain(&mut self, target: Target, total: Value) {
+        let index = self.link_targets.len();
+        assert!(index < self.link_capacity, "more region exits than links");
+        self.link_targets.push(match target {
+            Target::Known(pc) => Some(pc),
+            Target::Computed(_) => None,
+        });
+        // SAFETY: inside the `link_capacity` links the caller provided.
+        let link = unsafe { self.links.add(index) };
+        let link = self.b.ins().iconst(I64, link as i64);
+        let flags = MemFlagsData::trusted();
+        let epoch = self.b.ins().load(I64, flags, link, offset_of!(Link, epoch) as i32);
+        let current = self.b.ins().load(I64, flags, self.ctx, offset_of!(JitCtx, chain_epoch) as i32);
+        let mut valid = self.b.ins().icmp(IntCC::Equal, epoch, current);
         let next = match target {
             Target::Known(pc) => self.c(pc),
-            Target::Computed(v) => v,
+            Target::Computed(next) => {
+                let cached = self.b.ins().load(I32, flags, link, offset_of!(Link, target) as i32);
+                let same = self.b.ins().icmp(IntCC::Equal, cached, next);
+                valid = self.b.ins().band(valid, same);
+                next
+            }
         };
+        let len = self.b.ins().load(I32, flags, link, offset_of!(Link, len) as i32);
+        let after = self.b.ins().iadd(total, len);
+        let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, after, self.budget);
+        let go = self.b.ins().band(valid, fits);
+        let (jump, leave) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(go, jump, &[], leave, &[]);
+
+        self.b.switch_to_block(jump);
+        let chains = self.b.ins().load(I64, flags, self.ctx, offset_of!(JitCtx, chains) as i32);
+        let chains = self.b.ins().iadd_imm_u(chains, 1);
+        self.b.ins().store(flags, chains, self.ctx, offset_of!(JitCtx, chains) as i32);
+        let func = self.b.ins().load(I64, flags, link, offset_of!(Link, func) as i32);
+        let entry = self.b.ins().load(I32, flags, link, offset_of!(Link, entry) as i32);
+        self.b.ins().return_call_indirect(self.sig_region, func, &[self.ctx, self.cpu, self.budget, entry, total]);
+
+        self.b.switch_to_block(leave);
+        self.b.ins().store(flags, link, self.ctx, offset_of!(JitCtx, exit_link) as i32);
         self.finish(next, total);
     }
 

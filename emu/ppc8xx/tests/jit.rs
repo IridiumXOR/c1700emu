@@ -322,19 +322,36 @@ fn indirect_branches_with_link() {
 /// Figures 8-23/8-24 (as in tests/mmu.rs), a `tlbie` every pass so the
 /// misses keep coming, and a store to a read-only page in the middle of a
 /// block (DTLB error, skipped by its handler).
+// Translation on: a two-level page table at L1/L2, refilled by the
+// reload handlers of MPC860UM Figures 8-23/8-24 (as in tests/mmu.rs).
+const L1: u32 = 0x4000;
+const L2: u32 = 0x5000;
+const DTLB_RELOAD: &[&str] =
+    &["mtspr 799, r1", "mfspr r1, 796", "lwz r1, 0(r1)", "mtspr 797, r1", "mfspr r1, 797", "lwz r1, 0(r1)", "mtspr 798, r1", "mfspr r1, 799", "rfi"];
+const ITLB_RELOAD: &[&str] = &[
+    "mtspr 799, r1", "mfspr r1, 26", "mtspr 795, r1", "mfspr r1, 796", "lwz r1, 0(r1)", "mtspr 789, r1",
+    "mtspr 797, r1", "mfspr r1, 797", "lwz r1, 0(r1)", "mtspr 790, r1", "mfspr r1, 799", "rfi",
+];
+
+/// PTE: page | PP | C | four valid sub-pages | V
+fn pte(pa: u32, pp: u32) -> u32 {
+    pa | pp << 10 | 0x100 | 0xF0 | 1
+}
+
+/// The reload handlers and an L1 entry for the first 4 MB; the L2 entries
+/// are the test's.
+fn page_table(cpu: &mut Cpu, board: &mut TestBoard) {
+    use ppc8xx::mmu::spr as mmu_spr;
+    place(board, 0x1100, ITLB_RELOAD);
+    place(board, 0x1200, DTLB_RELOAD);
+    board.poke32(L1, L2 | 1);
+    cpu.mmu.write_spr(mmu_spr::M_TWB, L1);
+    cpu.mmu.write_spr(mmu_spr::MD_AP, 0x5555_5555);
+    cpu.mmu.write_spr(mmu_spr::MI_AP, 0x5555_5555);
+}
+
 #[test]
 fn translated_mode_with_tlb_misses_and_faults() {
-    use ppc8xx::mmu::spr as mmu_spr;
-    const L1: u32 = 0x4000;
-    const L2: u32 = 0x5000;
-    const DTLB_RELOAD: &[&str] =
-        &["mtspr 799, r1", "mfspr r1, 796", "lwz r1, 0(r1)", "mtspr 797, r1", "mfspr r1, 797", "lwz r1, 0(r1)", "mtspr 798, r1", "mfspr r1, 799", "rfi"];
-    const ITLB_RELOAD: &[&str] = &[
-        "mtspr 799, r1", "mfspr r1, 26", "mtspr 795, r1", "mfspr r1, 796", "lwz r1, 0(r1)", "mtspr 789, r1",
-        "mtspr 797, r1", "mfspr r1, 797", "lwz r1, 0(r1)", "mtspr 790, r1", "mfspr r1, 799", "rfi",
-    ];
-    // PTE: page | PP | C | four valid sub-pages | V
-    let pte = |pa: u32, pp: u32| pa | pp << 10 | 0x100 | 0xF0 | 1;
     let (cpu, ..) = both(
         &[
             "lis r3, 2",            // loop: EA 0x20000.., 8 pages
@@ -351,18 +368,13 @@ fn translated_mode_with_tlb_misses_and_faults() {
             "b -44",
         ],
         |cpu, board| {
-            place(board, 0x1100, ITLB_RELOAD);
-            place(board, 0x1200, DTLB_RELOAD);
+            page_table(cpu, board);
             place(board, 0x1400, &["mfsrr0 r21", "addi r21, r21, 4", "mtsrr0 r21", "rfi"]);
-            board.poke32(L1, L2 | 1);
             board.poke32(L2 + 4, pte(0x1000, 1)); // the code page, executable
             for i in 0..8 {
                 board.poke32(L2 + (0x20 + i) * 4, pte(0x8000 + i * 0x1000, if i == 5 { 3 } else { 2 }));
                 board.poke32(0x8000 + i * 0x1000, 0x100 + i);
             }
-            cpu.mmu.write_spr(mmu_spr::M_TWB, L1);
-            cpu.mmu.write_spr(mmu_spr::MD_AP, 0x5555_5555);
-            cpu.mmu.write_spr(mmu_spr::MI_AP, 0x5555_5555);
             cpu.msr = msr::ME | msr::IR | msr::DR;
         },
         30_000,
@@ -401,4 +413,68 @@ fn timebase_and_decrementer_reads() {
         assert!(cpu.tb > 0x1_0000_0000, "the timebase wrapped into TBU");
         assert_eq!(cpu.gpr[20] > 0, user, "program exceptions in user mode only");
     }
+}
+
+/// Chaining (docs ch. 17.14): a region jumps straight into the region it
+/// calls, and the callee's `blr` straight back. Every 64 calls the caller
+/// rewrites the callee's first instruction: the link into the dropped
+/// region must not be used any more.
+#[test]
+fn chained_jump_into_rewritten_code() {
+    let (cpu, _, jit) = both(
+        &[
+            "addi r8, r8, 1",       // loop:
+            "bl 0xffc",             // the callee at 0x2000, in another region
+            "andi. r9, r8, 63",
+            "bne -12",
+            "lwz r6, 0(r4)",        // toggle its immediate between 1 and 2
+            "xor r6, r6, r7",
+            "stw r6, 0(r4)",
+            "b -28",
+        ],
+        |cpu, board| {
+            place(board, 0x2000, &["addi r3, r3, 1", "blr"]);
+            cpu.gpr[4] = 0x2000;
+            cpu.gpr[7] = 1 ^ 2;
+        },
+        20_000,
+    );
+    assert!(cpu.gpr[8] > 2000, "calls: {}", cpu.gpr[8]);
+    assert!(jit.stats.chained_runs > 1000, "chained runs: {}", jit.stats.chained_runs);
+}
+
+/// Chaining with translation on: the caller calls virtual 0x20000, which
+/// maps alternately to two physical pages holding different code (the PTE
+/// is switched and the old translation invalidated with `tlbie` every 64
+/// calls). A link made under the old mapping must not be used.
+#[test]
+fn chained_jump_follows_an_instruction_remap() {
+    let (cpu, _, jit) = both(
+        &[
+            "addi r8, r8, 1",       // loop:
+            "bl 0x1effc",           // virtual 0x20000
+            "andi. r9, r8, 63",
+            "bne -12",
+            "lwz r6, 0(r4)",        // switch the PTE between the two pages
+            "xor r6, r6, r7",
+            "stw r6, 0(r4)",
+            "tlbie r5",
+            "b -32",
+        ],
+        |cpu, board| {
+            page_table(cpu, board);
+            board.poke32(L2 + 4, pte(0x1000, 1)); // the caller's page
+            board.poke32(L2 + 0x20 * 4, pte(0x8000, 1)); // virtual 0x20000
+            place(board, 0x8000, &["addi r3, r3, 1", "blr"]);
+            place(board, 0x9000, &["addi r3, r3, 16", "blr"]);
+            cpu.gpr[4] = L2 + 0x20 * 4;
+            cpu.gpr[5] = 0x20000;
+            cpu.gpr[7] = 0x8000 ^ 0x9000;
+            cpu.msr = msr::ME | msr::IR; // data accesses untranslated
+        },
+        20_000,
+    );
+    assert!(cpu.gpr[8] > 1000, "calls: {}", cpu.gpr[8]);
+    assert!(cpu.gpr[3] > 16 * 500, "the second page's code ran too: r3={}", cpu.gpr[3]);
+    assert!(jit.stats.chained_runs > 1000, "chained runs: {}", jit.stats.chained_runs);
 }

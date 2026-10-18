@@ -7,6 +7,7 @@
 //! ordinary Rust structs; `offset_of!` tells the code generator where things
 //! are, so nothing has to be `repr(C)` except what the code reads directly.
 
+use super::codegen::Link;
 use crate::mmu::Access;
 use crate::{BusError, Cpu, Exception, Platform, msr};
 
@@ -133,6 +134,15 @@ pub(super) struct JitCtx {
     /// memory map may have changed. (Translated code alone can't change
     /// them, so after most blocks there is nothing to check.)
     pub touched: bool,
+    /// Region chaining (`codegen::Link`): links filled in under another
+    /// epoch are stale. Moves when a region is dropped or the instruction
+    /// translation may have changed.
+    pub chain_epoch: u64,
+    /// The link of the exit the last region left by (null: it left another
+    /// way), for the dispatcher to fill in.
+    pub exit_link: *mut Link,
+    /// Jumps made straight from one region into another.
+    pub chains: u64,
 }
 
 impl JitCtx {
@@ -151,6 +161,9 @@ impl JitCtx {
             mmu_generation: 0,
             code_writes: Vec::new(),
             touched: false,
+            chain_epoch: 0,
+            exit_link: std::ptr::null_mut(),
+            chains: 0,
         })
     }
 }

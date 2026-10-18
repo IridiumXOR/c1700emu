@@ -455,6 +455,11 @@ impl Mmu {
         self.dtlb.fast.flushes
     }
 
+    /// The same for instruction translations.
+    pub fn instruction_generation(&self) -> u64 {
+        self.itlb.fast.flushes
+    }
+
     fn translate_slow(&mut self, ea: u32, access: Access, user: bool) -> Result<u32, Fault> {
         let instruction = access == Access::Fetch;
         let casid = self.m_casid;

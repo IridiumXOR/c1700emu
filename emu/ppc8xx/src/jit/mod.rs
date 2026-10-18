@@ -19,6 +19,14 @@
 //!   that were translated and reports writes to them
 //!   ([`Platform::watch_code`]); the translations covering a written word
 //!   are dropped and retranslated when needed.
+//! * **Chaining.** A region exit to a known address jumps straight into
+//!   the region there once the dispatcher has linked the two (see
+//!   `codegen.rs`). Nothing the dispatcher checks between regions can
+//!   change on such a path: interrupts can only appear through a helper
+//!   (which ends the region), the decrementer is covered by the budget, the
+//!   MSR and the MMU only change in the interpreter. Links die together
+//!   (`JitCtx::chain_epoch`) when a region is dropped or the instruction
+//!   translation may have changed.
 
 mod check;
 mod codegen;
@@ -30,7 +38,7 @@ pub use watch::{CodeWatch, WORDS_PER_PAGE, word_id};
 
 use crate::mmu::{Access, Fault};
 use crate::{BatchEnd, Cpu, Exception, Platform, StepOutcome, msr};
-use codegen::{BlockFn, Compiler, EARLY, RAISED, STEPS};
+use codegen::{Compiler, EARLY, LINKS_PER_BLOCK, Link, RAISED, RegionCode, STEPS};
 use powerpc::{Extensions, Ins};
 use runtime::{Helpers, JitCtx, mode_index};
 use std::collections::HashMap;
@@ -77,7 +85,7 @@ fn jump_slot(pc: u32) -> usize {
 /// A ready entry point: block number `entry` of a translated region.
 #[derive(Clone, Copy)]
 struct Translated {
-    func: BlockFn,
+    func: RegionCode,
     entry: u32,
     /// Length of that block: it must fit before the region is entered.
     len: u32,
@@ -130,6 +138,10 @@ pub struct JitStats {
     /// Guest instructions in all translated blocks (for the average size).
     pub translated_instructions: u64,
     pub block_runs: u64,
+    /// Regions entered straight from another one (chaining).
+    pub chained_runs: u64,
+    /// Links filled in by the dispatcher.
+    pub links_made: u64,
     /// Instructions executed by translated code.
     pub jit_instructions: u64,
     /// Instructions executed by the interpreter, by reason.
@@ -185,6 +197,14 @@ pub struct Jit {
     threshold: u32,
     /// Lockstep checking: verify every region run with the interpreter.
     check: bool,
+    /// The links of all regions translated since the last flush (the
+    /// generated code holds pointers into them).
+    links: Vec<Box<[Link]>>,
+    /// The link of the exit the last region run left by, to fill in if the
+    /// next thing the dispatcher does is running a region at its target.
+    pending_link: *mut Link,
+    /// `Mmu::instruction_generation` the links were made under.
+    itlb_generation: u64,
     pub stats: JitStats,
 }
 
@@ -210,6 +230,9 @@ impl Jit {
             regions: Vec::new(),
             threshold: threshold.max(1),
             check: false,
+            links: Vec::new(),
+            pending_link: std::ptr::null_mut(),
+            itlb_generation: 0,
             stats: JitStats::default(),
         }
     }
@@ -227,9 +250,12 @@ impl Jit {
     pub fn run_batch<P: Platform>(&mut self, cpu: &mut Cpu, sys: &mut P, max: u64, mut stop_before: impl FnMut(u32) -> bool) -> (u64, BatchEnd) {
         self.ctx.helpers = Helpers::new::<P>();
         self.sync(cpu, sys);
+        self.pending_link = std::ptr::null_mut();
         let mut n = 0;
         while n < max {
             let pc = cpu.pc;
+            // Anything but running a region right here forgets the link.
+            let link = std::mem::replace(&mut self.pending_link, std::ptr::null_mut());
             if stop_before(pc) {
                 return (n, BatchEnd::Hook);
             }
@@ -294,6 +320,15 @@ impl Jit {
 
             let (k, end) = match action {
                 Action::Run(t) => {
+                    if !link.is_null() {
+                        // SAFETY: links live until the next flush, and a
+                        // flush clears `pending_link`.
+                        let link = unsafe { &mut *link };
+                        if link.target == pc || link.computed {
+                            *link = Link { func: t.func, epoch: self.ctx.chain_epoch, entry: t.entry, len: t.len, target: pc, computed: link.computed };
+                            self.stats.links_made += 1;
+                        }
+                    }
                     let (k, end) = if self.check { self.run_checked(cpu, sys, t, room, pc, pa) } else { self.run_translated(cpu, sys, t, room) };
                     n += k;
                     if end == BatchEnd::Checkstop {
@@ -339,6 +374,9 @@ impl Jit {
     /// Throw every translation away (the machine was reset, or memory was
     /// rewritten behind the platform's back).
     pub fn flush<P: Platform>(&mut self, sys: &mut P) {
+        self.ctx.chain_epoch += 1;
+        self.pending_link = std::ptr::null_mut();
+        self.links.clear();
         self.blocks.clear();
         self.jump.fill(NO_JUMP);
         self.lines.clear();
@@ -369,14 +407,22 @@ impl Jit {
         let (cpu_ptr, sys_ptr): (*mut Cpu, *mut P) = (cpu, sys);
         ctx.cpu = cpu_ptr;
         ctx.sys = sys_ptr as *mut ();
+        ctx.exit_link = std::ptr::null_mut();
+        let chains = ctx.chains;
         let ctx_ptr: *mut JitCtx = ctx;
-        // SAFETY: the block was generated for this JitCtx/Cpu layout; the
-        // pointers are live and exclusively used by the block for the call.
-        let r = unsafe { (t.func)(ctx_ptr, cpu_ptr, budget, t.entry) };
+        // SAFETY: the region was generated for this JitCtx/Cpu layout; the
+        // pointers are live and exclusively used by the code for the call.
+        let r = unsafe { (self.compiler.trampoline)(ctx_ptr, cpu_ptr, budget, t.entry, t.func) };
 
         let steps = (r & STEPS) as u64;
         cpu.advance_clock(steps);
         self.stats.block_runs += 1;
+        self.stats.chained_runs += self.ctx.chains - chains;
+        // Left by a linkable exit: the dispatcher links it to what runs next
+        // (not when checking, which verifies one region run at a time).
+        if r & (RAISED | EARLY) == 0 && !self.check {
+            self.pending_link = self.ctx.exit_link;
+        }
         self.stats.jit_instructions += steps;
         if r & RAISED != 0 {
             // Precise exception at the region's `steps`-th instruction; like
@@ -499,8 +545,16 @@ impl Jit {
         // reach the platform, which checks them.
         self.ctx.tables.flush_writes();
         let start = Instant::now();
-        match self.compiler.compile(&region) {
-            Ok(func) => {
+        let mut links: Box<[Link]> = (0..LINKS_PER_BLOCK * region.len()).map(|_| Link::UNUSED).collect();
+        match self.compiler.compile(&region, links.as_mut_ptr()) {
+            Ok((func, targets)) => {
+                for (link, target) in links.iter_mut().zip(targets) {
+                    match target {
+                        Some(pc) => link.target = pc,
+                        None => link.computed = true,
+                    }
+                }
+                self.links.push(links);
                 self.stats.blocks_translated += 1;
                 self.stats.entries_translated += region.len() as u64;
                 self.stats.translated_instructions += region.iter().map(|b| b.insns.len() as u64).sum::<u64>();
@@ -540,6 +594,7 @@ impl Jit {
                 let Some(keys) = self.regions[id].take() else { continue };
                 log::debug!(target: "jit", "code word {word:#x} written: region at {:#010x} dropped", keys[0] as u32);
                 self.stats.invalidated_blocks += 1;
+                self.ctx.chain_epoch += 1; // links may lead into it
                 for k in keys {
                     self.blocks.remove(&k);
                     let slot = jump_slot(k as u32);
@@ -561,6 +616,12 @@ impl Jit {
             self.ctx.mmu_generation = generation;
             self.ctx.tables.flush_translated();
         }
+        // A linked exit doesn't translate its target address again.
+        let generation = cpu.mmu.instruction_generation();
+        if generation != self.itlb_generation {
+            self.itlb_generation = generation;
+            self.ctx.chain_epoch += 1;
+        }
     }
 
     /// Statistics for `--stats`.
@@ -580,10 +641,11 @@ impl Jit {
             s.invalidated_blocks,
         );
         out += &format!(
-            "  instructions: {:.1}% translated code ({} region runs, avg {:.1}), interpreted: {:.1}% cold, {:.1}% untranslatable, {:.1}% tails, {:.1}% unwatched memory\r\n",
+            "  instructions: {:.1}% translated code ({} region runs, {} of them chained, avg {:.1}), interpreted: {:.1}% cold, {:.1}% untranslatable, {:.1}% tails, {:.1}% unwatched memory\r\n",
             pct(s.jit_instructions),
-            s.block_runs,
-            s.jit_instructions as f64 / s.block_runs.max(1) as f64,
+            s.block_runs + s.chained_runs,
+            s.chained_runs,
+            s.jit_instructions as f64 / (s.block_runs + s.chained_runs).max(1) as f64,
             pct(s.cold),
             pct(s.stops),
             pct(s.tail),

@@ -442,6 +442,7 @@ self-decompression; accelerators and idle detection off):
 | multi-entry regions (no duplicate compiling) | | 302.2 (compiling: 0.3 s) |
 | clock helpers inlined | **32.0** | **312.6** (93.8 s vs **9.6 s**) |
 | registers per guest block, comparisons feed branches (17.13) | | +1.5% (297.4 → 301.6 in one A/B session) |
+| chaining (17.14) | | +17% (301.1 → 352.9 in one A/B session) |
 
 (Absolute numbers move by a few percent from one day to the next with
 the machine's state: the old binary gave 297-300 MIPS in the session of
@@ -468,7 +469,8 @@ than the real one. With idle detection on (the default), both engines
 reach `Router>` at about the same time: virtual time may not run ahead of
 the wall clock, and IOS's boot waits on its own timers (17.9).
 
-Where the time goes now (`perf`, benchmark): translated code 43%, the
+Where the time went at this point (`perf`, benchmark; 17.15 has today's
+numbers): translated code 43%, the
 dispatcher ~14%, reading the IOS image out of flash through the device
 path ~10%, the interpreter for the rest (tails, cold code, untranslatable
 instructions).
@@ -503,8 +505,15 @@ run** against the interpreter while the machine runs (`jit/check.rs`):
 this board) are not logged: the interpreter asks for every `mfspr`, the
 JIT only for helper ones, and the answer has no side effects.
 
-The ten JIT tests also run in check mode, and the exact ROMMON boot test
-boots with `--cpu jit-check` too. A whole IOS boot: CHECK_RESULT.
+The JIT tests also run in check mode, and the exact ROMMON boot test
+boots with `--cpu jit-check` too. A whole IOS boot in check mode
+(`SCALE=20 LIMIT=30000 tools/ios_session.py ... --cpu jit-check`) reaches
+`Router>` after 503 s, against 30 s unchecked: **102,754,115 region runs
+verified, all identical**. (With `--idle off` the idle loop runs too: a
+first run verified 291,591,636 region runs, about 6 billion instructions,
+before the session driver gave up waiting for the setup dialog.)
+Regions are checked one run at a time, so chaining (17.14) is off in
+check mode.
 
 ## 17.13 Step 10: registers in host registers, comparisons feeding branches
 
@@ -587,22 +596,106 @@ are caught: removing the stub stores, the store before a helper or the
 reload after it, or inverting the cached comparison, each makes JIT tests
 fail.
 
-## 17.14 What limits it, and next steps
+## 17.14 Step 11: chaining regions
 
-`perf record -e cycles:u` of the benchmark (after 17.13):
+After 17.13 the dispatcher (`run_batch`) took 14% of the benchmark: every
+time a region left (a call, a return, a loop spanning two regions), Rust
+code found the next region (interrupt check, MMU translation of the PC,
+jump cache), checked the budget, advanced the clock and called it. With
+regions averaging 49 instructions per run, that adds up.
+
+**Chaining** jumps from one region straight into the next, as QEMU does
+between its translation blocks:
+
+1. Every region exit to a known address outside the region gets a
+   **link**, a small record the generated code reads: `{func, entry, len,
+   epoch, target}`.
+2. The exit code checks the link: current (`epoch` equals
+   `JitCtx::chain_epoch`) and the next block fits in the budget (`total +
+   len <= budget`)? Then it **jumps** into `func` at block `entry`.
+   Otherwise it returns to the dispatcher, leaving the link's address in
+   `JitCtx::exit_link`.
+3. The dispatcher fills that link in when the very next thing it does is
+   run a region at the link's target: `{that region, its entry, its first
+   block's length, the current epoch}`. From then on, that exit chains.
+
+The jump is a **tail call**: regions use Cranelift's `tail` calling
+convention and leave with `return_call_indirect`, so a chain of a
+thousand regions uses one stack frame. The steps executed so far are
+passed along as a fifth argument (`done`), so each region continues
+counting from there and the last one returns the total for the whole
+chain. Rust can't call a `tail`-convention function, so the dispatcher
+calls regions through a five-instruction **trampoline** compiled once per
+code module (C convention in, `tail` convention out, `done` = 0). (One
+surprise: Cranelift's x86-64 tail calls need frame pointers, the
+`preserve_frame_pointers` flag; without it the first compile panics.)
+
+**Computed branches** (`blr`, `bctr`) have a link too, remembering the
+target it was last filled in for; the exit compares the branch's address
+with it before jumping. It is a one-entry inline cache: a loop calling a
+function returns to the same place every time.
+
+**Why nothing is skipped.** Between two regions the dispatcher checks
+hooks, interrupts, the decrementer, the MMU and its own caches. On a
+chained path none of these can change:
+
+* interrupts appear only through device accesses, and a helper that sees
+  one raised (with `MSR[EE]`=1) already ends the region;
+* the decrementer can't fire: the budget the chain shares was limited to
+  the instructions before it fires, and every chained jump checks it;
+* `MSR` and the MMU only change in instructions left to the interpreter
+  (`mtmsr`, `rfi`, `sc`, `tlbie`, MMU `mtspr`s), which always go back to
+  the dispatcher, so a whole chain runs in one mode;
+* hook addresses never start a region (17.6), and the hook set can only
+  shrink (idle detection narrows candidates down to one anchor).
+
+**Invalidation.** A link is current only while `chain_epoch` hasn't
+moved, and it moves when a region is dropped (rewritten code: a link may
+lead into it), on a flush, and when the instruction MMU's translations may
+have changed (`Mmu::instruction_generation`: a link doesn't translate its
+target address again). Each of these kills all links at once; they are
+filled in again lazily, one dispatcher round trip each, which is cheap
+next to how rarely it happens.
+
+**Tests.** `chained_jump_into_rewritten_code` (a caller rewrites the
+region it calls every 64 calls) and `chained_jump_follows_an_instruction_remap`
+(translation on: the called virtual page is switched between two physical
+pages with different code, `tlbie` after each switch) check the two
+invalidation rules; without the epoch bump each fails, as do the existing
+tests when the budget check or the computed-target comparison is removed.
+The IOS boot works as before.
+
+**Measured** (one A/B session, three runs each):
+
+| | MIPS | regions entered by the dispatcher |
+|---|---|---|
+| before chaining | 301.1 | 60.6 million |
+| known exits chained | 347.5 | 16.2 million |
+| computed branches too | **352.9** | 11.8 million |
+
++17%. 80% of region runs now start with a jump from another region, and
+the dispatcher's share of the time fell from 14% to 6%. IOS boots to
+`Router>` with `--idle off` in **32.0 s** (38.4 s before). The host code
+grew from 399 to 555 KB (frame pointers, the exit checks).
+
+## 17.15 What limits it, and next steps
+
+`perf record -e cycles:u` of the benchmark (after 17.14):
 
 | where | share |
 |---|---|
-| translated code | ~40% |
-| the dispatcher (`run_batch`: finding the next region, the budget) | 14% |
-| reading flash through the device model (`IntelFlash::read16`, `read8_slow`, the `load8` helpers) | ~19% |
-| the interpreter (tails, helper instructions, cold code) | ~12% |
+| translated code | 49% |
+| reading flash through the device model (`IntelFlash::read16`, `read8_slow`, the `load8` helpers) | ~16% |
+| the interpreter (`execute`, `fetch`, `interpret`: tails at batch ends, helper instructions) | ~11% |
+| the dispatcher | 6% |
+| device and machine bookkeeping per batch (`advance`, `sipend`, `Machine::run`) | ~4% |
 
 * **Flash reads.** ROMMON copies the 21 MB image out of flash byte by
   byte through the flash device model. Reading flash directly while it is
   in read-array mode needs a cheap way to invalidate just those
   fast-table entries when a command changes the mode (it happens for
   every word while programming).
-* **Region boundaries**: execution passes between regions through the
-  dispatcher; jumping straight from one region into another (chaining)
-  would remove that cost.
+* **Tails**: a region only starts if its first block fits in what is
+  left of the batch (256 instructions between device syncs), so the last
+  instructions of almost every batch are interpreted: 1.1% of the
+  instructions, but ~11% of the time.

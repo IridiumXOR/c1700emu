@@ -16,7 +16,9 @@ snapshot is saved (--snapshot FILE), "core" sends Ctrl-] d (ELF core dump,
 --core FILE), "host CMD" runs CMD on the host and logs its output (e.g. a
 ping to the router over a TAP device).
 LOG gets the console; LOG.stderr the emulator's stderr (stats).
-Environment: LIMIT = overall deadline in seconds (default 1500).
+Environment: LIMIT = overall deadline in seconds (default 1500); SCALE =
+factor for every individual wait (default 1; slow modes such as
+--cpu jit-check need e.g. SCALE=10 LIMIT=20000).
 """
 import os, subprocess, sys, time
 
@@ -48,7 +50,7 @@ def pump():
 last_cmd = 0  # where the output of the last command starts in buf
 
 def wait_for(*needles, limit=600, since=None):
-    end = min(time.time() + limit, deadline)
+    end = min(time.time() + limit * float(os.environ.get("SCALE", "1")), deadline)
     start = len(buf) if since is None else since
     while time.time() < end:
         pump()

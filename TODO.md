@@ -24,7 +24,7 @@ Chapter references are to `docs/`.
       bare RETURN); `--idle warp` is back; a snapshot/idle-detection bug
       found on the way is fixed (chapter 21, tools/tests/warp_test.py).
 
-## JIT (chapter 17.14)
+## JIT (chapter 17.15)
 
 - [ ] 8. Read flash directly (ROMMON's copy of the 21 MB image is ~10% of
       the benchmark); needs cheap invalidation when the flash leaves
@@ -34,7 +34,9 @@ Chapter references are to `docs/`.
 - [x] 10. Guest registers stay in host registers within a guest block
       (TCG-style dirty tracking, stored at block end, exits and helper
       calls); whole-region allocation was tried and is slower (chapter 17.13).
-- [ ] 11. Jump directly between regions instead of through the dispatcher.
+- [x] 11. Regions jump straight into each other (chaining: links filled
+      in by the dispatcher, tail calls, one-entry inline cache for
+      `blr`/`bctr`), +17%, chapter 17.14.
 - [x] 12. `--cpu jit-check`: every region run verified against the interpreter
       (record + replay), chapter 17.12; all JIT tests and the ROMMON boot
       run in check mode too.
