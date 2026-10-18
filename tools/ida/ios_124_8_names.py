@@ -105,6 +105,11 @@ FUNCS = {
     0x80123944: ("fpga_firmware_register",
                  "Registers the FPGA 'firmware' image: the longer length when no voice card is present "
                  "(slot_voice_present == 0) and IO FPGA reg 0x20 bits 0x40/0x80 are clear. (docs ch. 19)"),
+    # ---- hidden commands (docs ch. 25) ----
+    0x81C82840: ("voip_aaa_test_menu",
+                 "Hidden 'test voip' shell: prompt 'voip-aaa %d> ', commands help, notify success|failure <mlist> <type>, "
+                 "exit/quit. Its keyword is flagged 0x02: never listed by '?', even with service internal. (docs ch. 25)"),
+    0x80EF9B94: ("voip_aaa_parser_init", "Registers the VoIP AAA parser nodes, among them 'voip-aaa test menu utility'."),
     # ---- WIC detection and the WIC-1T serial port (docs ch. 23) ----
     0x80140E2C: ("smart_init_read_slot_eeproms",
                  "c1700_smart_init.c: per slot, read 64 words of the ID EEPROM (slot_eeprom_read); format 4 "
@@ -164,6 +169,10 @@ FUNCS = {
 
 DATA = {
     0x82393370: ("platform_string_jumptab", None),
+    0x828EA9DC: ("kw_show_coverage",
+                 "Parser keyword record (.rodata, docs ch. 25): {char *keyword, char *help, u32 *priv}. The priv word "
+                 "(.data): byte 0 = privilege level (0xFF = the mode's), byte 1 = flags: 0x01 shown only with "
+                 "'service internal', 0x02 never shown in help (still accepted when typed); 'show coverage' = 0xFF010000"),
     0x83053130 - 4: ("fpga_bitstream_xc2s100", "Xilinx Spartan-II configuration stream, FLR=0x0D (XC2S100-sized)"),
     0x83426FD0: ("fpga_bitstream_c1760_xc2s200", "Xilinx Spartan-II stream loaded on a 1760: FLR=0x11, 166980 bytes"),
     0x8306B214: ("slot_card_type", "per-slot card type from the WIC/VIC ID EEPROMs (SPI); 0xFF = no card"),
