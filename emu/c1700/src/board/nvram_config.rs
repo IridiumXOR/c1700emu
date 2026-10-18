@@ -29,8 +29,9 @@ const DEFAULT_VARS: &[(&str, &str)] = &[("PS1", "rommon ! > ")];
 const DEFAULT_ALIASES: &[u8] = b"r\0repeat\0h\0history\0?\0help\0b\0boot\0ls\0dir\0i\0reset\0k\0stack\0\0";
 /// The other non-zero bytes of the ROM's default area (what it writes on a
 /// fresh NVRAM): the IOMEM percentage (`emt_iomem_get`, NVRAM byte 0x9F:
-/// 25%), and 0x13 at 0xCB (read through a structure offset; meaning not
-/// identified).
+/// 25%), and 0x13 at 0xCB: the low byte of `boot_data[0]` = 19 (BOOT_COUNT;
+/// the ROM keeps `boot_data` in the monitor area at 0xC8, `boot_data_set`,
+/// docs ch. 24).
 const DEFAULT_BYTES: &[(usize, u8)] = &[(0x9F, 25), (0xCB, 0x13)];
 
 const IOS_HEADER: usize = 0x808;

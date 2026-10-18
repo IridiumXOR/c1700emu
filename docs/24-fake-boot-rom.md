@@ -209,7 +209,11 @@ real `emt_monvar_set`, a variable is written to NVRAM at once, checksum
 included (`monitor_area_sync`). The structures IOS reads through
 pointers (`boot_data`, the boot info, the two strings) are in low RAM at
 0x80004000, under the image's 0x80008000, which IOS leaves alone because
-it belongs to the ROM. The real ROM keeps its own at 0x800065AC-0x800073D4. The
+it belongs to the ROM. The real ROM keeps the strings and the boot info
+at 0x8000715C-0x800073D4. Its `boot_data` (0x800065AC) is part of its RAM
+copy of the monitor area: it is NVRAM 0xC8, saved with every
+`monitor_area_sync`. That is the 0x13 (BOOT_COUNT 19) that
+`nvram_config` writes at 0xCB on a fresh NVRAM. The
 next reload reason, the boot confreg and the "version string already
 set" flag are fields of `FakeRom`, and snapshots save them (chapter 20).
 
