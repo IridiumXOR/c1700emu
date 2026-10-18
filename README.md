@@ -86,6 +86,9 @@ Cisco's software is not part of this repository. You need:
   21 MB), which needs a voice-capable chassis (`--model 1760`, or 1750/1751)
   and 128 MB of RAM. Other C1700 images should work but are untested.
 
+(The author keeps these in a private companion repository, cloned as
+`roms/`: `git clone git@github.com:IridiumXOR/c1700emu-roms.git roms`.)
+
 ## 4. First run: ROMMON
 
 ```bash
