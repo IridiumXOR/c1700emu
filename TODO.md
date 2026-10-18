@@ -89,3 +89,8 @@ Chapter references are to `docs/`.
       bootdev_range, bootdev_read, copy16, cache maintenance), chapter 22.
 - [x] 15. Chapter 17's worked example also shows the loop as a region
       (jump table, step counter, budget check).
+- [x] 23. Hidden ROMMON and IOS commands and menus found, tried on the
+      emulator and documented: ROMMON `priv` (password = cookie sum) and
+      its 26 privileged commands, the diagnostic `menu`, `MONRC`; IOS
+      `service internal` diff and never-listed keywords (chapter 25,
+      tools/rommon_session.py, tools/ios_hidden_commands.py).

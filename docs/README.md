@@ -32,6 +32,7 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 21 | [Warp mode and the silent console](21-warp-and-the-silent-console.md) | `--idle warp` back; why the console "died": IOS's exec-timeout logout, found with snapshot-based experiments |
 | 22 | [ROMMON runs code from its stack](22-rommon-code-on-the-stack.md) | the "variable next to code" the JIT tripped over: ROMMON copies its checksum loop onto the stack to run it from RAM; traced with core dumps, `--watch` on the RAM alias, IDA |
 | 23 | [A WAN card: the WIC-1T](23-wic-1t-serial.md) | `--wic0 wic-1t --serial0 udp:...`: card-present bits, the ID EEPROM over SPI, the SCC in HDLC mode, modem signals and cable ID, two routers pinging over Serial0/0; the "looped" line of two lockstep emulators |
+| 25 | [Hidden commands and menus](25-hidden-commands.md) | ROMMON's command table, `priv` password (cookie sum), diagnostic menu (17 hardware tests pass on the emulator), MONRC startup script; IOS: 23 keywords from `service internal`, never-listed keywords (parser privilege flags), the hidden `test voip` shell |
 
 Reference material:
 
