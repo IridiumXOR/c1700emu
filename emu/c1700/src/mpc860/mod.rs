@@ -402,6 +402,17 @@ impl Mpc860 {
         Some((ticks_left - 1) * period + (period - self.pit.acc.min(period)))
     }
 
+    /// CPU cycles until the PIT next reaches zero (sets PISCR[PS]), if it
+    /// runs, whether or not that interrupts: software may poll PS.
+    pub fn cycles_until_pit_expiry(&self) -> Option<u64> {
+        if self.load16(PISCR) & 0x0001 == 0 {
+            return None; // PTE clear
+        }
+        let period = self.cycles_per_pit_tick();
+        let ticks_left = self.pit.count.max(1) as u64;
+        Some((ticks_left - 1) * period + (period - self.pit.acc.min(period)))
+    }
+
     /// Advance on-chip timers by `cycles` CPU cycles.
     pub fn advance(&mut self, cycles: u64) {
         let piscr = self.load16(PISCR);

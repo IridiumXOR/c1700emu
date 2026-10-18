@@ -126,6 +126,9 @@ pub struct Watch {
 pub const CYCLES_PER_US: u64 = 48;
 /// How often the virtual network runs (in CPU cycles).
 const NET_POLL_INTERVAL: u64 = 4096;
+/// How often the devices are synced while the FEC is transmitting (each
+/// sync sends what the transmit ring holds).
+const FEC_BUSY_INTERVAL: u64 = 256;
 
 impl Board {
     fn watch_access(&self, addr: u32, size: u32, value: u32, write: bool) {
@@ -264,6 +267,24 @@ impl Board {
             }
         }
         self.update_irq();
+    }
+
+    /// CPU cycles until a device has something timed to do: the PIT
+    /// expires, the network is due for a poll, or the FEC has DMA work
+    /// (then soon: transmits progress at each sync). The machine syncs the
+    /// devices then, rather than at a fixed interval (docs ch. 17.16).
+    pub fn cycles_until_event(&self) -> u64 {
+        let mut cycles = u64::MAX;
+        if let Some(c) = self.mpc.cycles_until_pit_expiry() {
+            cycles = cycles.min(c);
+        }
+        if self.net.is_some() {
+            cycles = cycles.min(NET_POLL_INTERVAL.saturating_sub(self.now_cycles - self.last_net_poll));
+        }
+        if self.mpc.fec.enabled() && self.mpc.fec.tx_active {
+            cycles = cycles.min(FEC_BUSY_INTERVAL);
+        }
+        cycles
     }
 
     /// Let the CPM (communication processor) act on commands software just

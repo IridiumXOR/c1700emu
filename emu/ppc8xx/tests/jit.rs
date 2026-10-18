@@ -9,7 +9,8 @@ use common::*;
 use ppc8xx::jit::Jit;
 use ppc8xx::{BatchEnd, Cpu, msr};
 
-/// Steps per batch, as in the machine (`DEVICE_SYNC_INTERVAL`).
+/// Steps per batch (the machine syncs its devices at least this often while
+/// the FEC transmits; short batches exercise the batch-end paths).
 const BATCH: u64 = 256;
 
 /// Run `steps` steps, with the JIT if one is given.

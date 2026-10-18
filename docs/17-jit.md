@@ -235,8 +235,9 @@ The dispatcher reproduces `Cpu::step` at block granularity:
   change inside a batch is a device access, which goes through a helper.
   If it raised the line (with `EE=1`), the helper tells the block to stop
   right after that instruction.
-* **Batch budget**: the machine syncs devices every 256 instructions; a
-  block that doesn't fit before that point is interpreted instead (with
+* **Batch budget**: the machine syncs devices at fixed points (every 256
+  instructions at first, at the next device event since 17.16); a block
+  that doesn't fit before that point is interpreted instead (with
   regions: also part of the budget).
 * **Hooks**: the machine has per-address hooks (ROM delay loops and
   memory clear, the idle anchor). The dispatcher stops before a hook
@@ -473,7 +474,8 @@ self-decompression; accelerators and idle detection off):
 | registers per guest block, comparisons feed branches (17.13) | | +1.5% (297.4 → 301.6 in one A/B session) |
 | chaining (17.14) | | +17% (301.1 → 352.9 in one A/B session) |
 | flash read directly (17.15) | | +17% (349.6 → 408.7 in one A/B session) |
-| `Board::fetch` always inlined (17.9) | **35.8** | 414 |
+| `Board::fetch` always inlined (17.9) | 35.8 | 414 |
+| devices synced at events (17.16) | **36.3** | **655** (82.7 s vs **4.6 s**) |
 
 (Absolute numbers move by a few percent from one day to the next with
 the machine's state: the old binary gave 297-300 MIPS in the session of
@@ -760,23 +762,69 @@ With 17.13-17.15 together the JIT runs the benchmark at ~410 MIPS,
 17.9), and IOS reaches `Router>` with `--idle off` in **30.4 s**
 (interpreter: 217.8 s).
 
-## 17.16 What limits it, and next steps
+## 17.16 Step 13: syncing devices at events, not every 256 instructions
 
-`perf record -e cycles:u` of the benchmark (after 17.15):
+After 17.15 two of the remaining costs had the same cause: the machine
+synced the devices every 256 instructions (`DEVICE_SYNC_INTERVAL`). Each
+sync costs bookkeeping (PIT, FEC DMA, network poll check, interrupt
+lines: ~6%), and each batch boundary makes the JIT interpret the few
+instructions before it, because a region only starts if its first block
+fits (~11-15%). Raising the interval to 2048, as an experiment: 404 →
+622 MIPS. Too big to leave on the table, but a fixed long interval would
+make every device event late.
 
-| where | share |
-|---|---|
-| translated code | 59% |
-| the interpreter (`execute`, `fetch`, `interpret`: tails at batch ends, helper instructions) | ~15% |
-| the dispatcher (`run_batch`, `sync`) | ~9% |
-| device and machine bookkeeping per batch (`sipend`, `advance`, `Machine::run`) | ~6% |
+The devices were asked instead *when* they next need attention:
 
-* **Tails**: a region only starts if its first block fits in what is
-  left of the batch (256 instructions between device syncs), so the last
-  instructions of almost every batch are interpreted: 1.1% of the
-  instructions, but ~15% of the time. Splitting a region's entry block at
-  the budget (or longer batches when no device needs attention) would
-  remove most of it.
-* **Per-batch bookkeeping**: the machine syncs the devices every 256
-  instructions; with the JIT that granularity costs more than the
-  instructions themselves in some loops.
+```rust
+pub fn cycles_until_event(&self) -> u64   // Board
+    the PIT reaches zero (if it runs: software may poll PISCR[PS]);
+    the network is due for a poll (every 4096 cycles, if there is a network);
+    the FEC is transmitting: soon (256 cycles: each sync sends what the ring holds);
+```
+
+The machine computes it at every sync and syncs again when that many
+instructions have run, at most `MAX_SYNC_INTERVAL` = 4096. The rest
+follows from the existing design:
+
+* **Both engines** use the same rule, so they still stop at the same
+  instructions and the exact-boot test still compares them instruction
+  for instruction.
+* **Timer events got more precise**, not less: a PIT expiry used to be
+  seen at the next multiple of 256 instructions, now exactly when it is
+  due.
+* A **register write that starts something** (a transmit, a timer) is
+  seen at the next sync, at most 4096 instructions (85 µs of virtual time)
+  later, against 256 before. Once the FEC transmits, syncs are every 256
+  again. Interrupts raised by device accesses are unaffected: they end
+  the region at once (17.6).
+* **Snapshots** store the sync horizon, so a restored machine syncs at
+  exactly the same instructions as the original (snapshot format 2;
+  `snapshot_restore_continues_identically` checks it).
+
+**Measured** (one A/B session): JIT **414.8 → 650.4 MIPS** (+57%),
+interpreter 36.5 → 37.0 MIPS (1 G instructions, +1.4%: it paid the sync
+too, but not the tails). The JIT's tails fell from 1.1% to 0.1% of the
+instructions, and translated code is now **84%** of the time. IOS boots to
+`Router>` with `--idle off` in **21.3 s** (30.4 s before).
+
+**Tests.** All unit, JIT and boot tests pass unchanged (ROMMON boots
+identically with both engines, the accelerators stay exact, a restored
+snapshot continues identically). With IOS: pings to the virtual host
+5/5, the TAP test (both directions), the warp test (×51, console answers)
+and the exec-timeout test, on a new snapshot.
+
+## 17.17 What limits it, and next steps
+
+`perf record -e cycles:u` of the benchmark (after 17.16): **84%
+translated code**; the dispatcher, the interpreter, Cranelift compiling
+and the devices are 1% or less each. From here on, speed comes from the
+quality of the generated code:
+
+* CR fields are still built bit by bit after every compare and record
+  form (`cmp` + three `setcc` + shifts and ors); deferring the CR build
+  until something reads it would remove most of that.
+* Registers are stored at the end of every guest block (17.13); keeping
+  them across the internal jumps of a loop would need a smarter
+  allocation than the whole-region attempt.
+* Memory accesses check the fast table on every access, even for the
+  same page as the previous access in the block.

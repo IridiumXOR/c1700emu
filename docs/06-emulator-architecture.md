@@ -119,8 +119,10 @@ register access is counted; that table found most of the IOS bugs.
 One executed instruction = one CPU cycle. The core advances the timebase
 every 16 cycles (TB = SYSCLK/16, ~3 MHz like the real board, whose
 `delay_ms` assumes 3024 ticks/ms) and counts the decrementer down with it,
-but only while TBSCR[TBE] is set. Devices are advanced every 256
-instructions (`DEVICE_SYNC_INTERVAL`). Consequences:
+but only while TBSCR[TBE] is set. Devices are advanced in batches: up to
+the next timed device event (PIT expiry, network poll, FEC transmit
+work), at most every 4096 instructions (`MAX_SYNC_INTERVAL`; it was a
+fixed 256 until chapter 17.16). Consequences:
 
 * runs are **deterministic** — the same inputs produce the same instruction
   count, which makes bugs reproducible;

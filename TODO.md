@@ -24,7 +24,7 @@ Chapter references are to `docs/`.
       bare RETURN); `--idle warp` is back; a snapshot/idle-detection bug
       found on the way is fixed (chapter 21, tools/tests/warp_test.py).
 
-## JIT (chapter 17.16)
+## JIT (chapter 17.17)
 
 - [x] 8. Flash read directly in read-array mode (`host_page` + a cheap
       `host_page_epoch` that only empties the fast tables when a command
@@ -44,6 +44,16 @@ Chapter references are to `docs/`.
       LLVM stopped inlining `Board::fetch` into the interpreter loop once
       the JIT called it too; now `#[inline(always)]`, interpreter 32.0 →
       35.8 MIPS (chapter 17.9).
+
+- [x] 16. Found on the way: device syncs every 256 instructions made the
+      JIT interpret the end of every batch and pay per-batch bookkeeping;
+      devices are now synced at their next event (at most every 4096),
+      JIT 415 → 650 MIPS, IOS to `Router>` (--idle off) in 21.3 s,
+      chapter 17.16.
+- [ ] 17. Found on the way: in realtime idle mode the emulator sleeps until
+      the next guest timer, so a frame from a TAP/UDP link waits for it
+      (host → router ping 3-15 ms instead of ~1 ms). Wake the idle sleep
+      when a host frame arrives.
 
 ## IDA and docs
 

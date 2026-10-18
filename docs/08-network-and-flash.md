@@ -59,7 +59,7 @@ by the FEC when it finds a BD it doesn't own. A model that kept returning
 "active" would send exactly one frame and then never again. The register
 part lives in `mpc860/fec.rs`; the ring walking needs RAM access, so it lives
 on the board in `board/fec_dma.rs` and runs every device sync (every 256
-instructions). Received frames are padded to the Ethernet minimum (60 bytes)
+instructions while a transmit is in progress, chapter 17.16). Received frames are padded to the Ethernet minimum (60 bytes)
 and get a real CRC-32 appended (`crc32fast`), like the hardware stores it.
 
 ## 8.3 The virtual network

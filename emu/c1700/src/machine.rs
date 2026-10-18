@@ -1,9 +1,10 @@
 //! The complete system: CPU core + board, and the loop that drives them.
 //!
 //! Time is *virtual*: one executed instruction = one CPU cycle. Devices are
-//! advanced in small batches (every [`DEVICE_SYNC_INTERVAL`] instructions)
-//! instead of after every instruction — the ROM can't tell the difference,
-//! and it keeps the inner loop tight.
+//! advanced in batches instead of after every instruction: up to the next
+//! timed device event (a PIT expiry, a network poll, FEC DMA work), at most
+//! [`MAX_SYNC_INTERVAL`] instructions (docs ch. 17.16). The guest can't tell
+//! the difference, and it keeps the inner loop tight.
 
 use crate::board::{Board, BoardConfig, nvram::Nvram};
 use crate::fastforward::FastForward;
@@ -14,8 +15,11 @@ use ppc8xx::jit::Jit;
 use ppc8xx::{BatchEnd, Cpu, Platform, StepOutcome, msr};
 use std::collections::{BTreeSet, HashMap};
 
-/// Instructions between two device updates (timers, interrupt line).
-pub const DEVICE_SYNC_INTERVAL: u64 = 256;
+/// Most instructions between two device updates (timers, interrupt line,
+/// DMA). A device event due sooner shortens the stretch
+/// (`Board::cycles_until_event`). It also bounds how late the devices see a
+/// register write that starts something (a transmit, a timer).
+pub const MAX_SYNC_INTERVAL: u64 = 4096;
 
 /// PLPRCR[CSR]: checkstop reset enable.
 const PLPRCR_CSR: u32 = 0x0000_0080;
@@ -61,6 +65,9 @@ pub struct Machine {
     pub trace: bool,
     /// Cycles executed since the last device sync.
     unsynced: u64,
+    /// Sync the devices when `unsynced` reaches this: the next device event,
+    /// as computed at the last sync.
+    sync_horizon: u64,
     pub resets: u32,
     /// Optional execution profile: one counter per ROM instruction word.
     pub profile: Option<Vec<u64>>,
@@ -100,6 +107,7 @@ impl Machine {
             breakpoints: BTreeSet::new(),
             trace: false,
             unsynced: 0,
+            sync_horizon: 1,
             resets: 0,
             profile: None,
             pc_samples: None,
@@ -135,6 +143,7 @@ impl Machine {
         self.cpu.visit_state(v);
         self.board.visit_state(v);
         v.u64(&mut self.unsynced);
+        v.u64(&mut self.sync_horizon);
         v.u32(&mut self.resets);
         self.idle.visit_state(v);
         self.fast_forward.visit_state(v);
@@ -212,7 +221,7 @@ impl Machine {
             } else {
                 // Fast path: a batch until the next device sync, a hook page
                 // or a checkstop, by the interpreter (step inlined) or the JIT.
-                let max = (DEVICE_SYNC_INTERVAL.saturating_sub(self.unsynced)).max(1).min(budget - done);
+                let max = (self.sync_horizon.saturating_sub(self.unsynced)).max(1).min(budget - done);
                 let (n, end) = if self.jit.is_some() {
                     self.jit_batch(max)
                 } else {
@@ -227,7 +236,7 @@ impl Machine {
                     }
                 }
             }
-            if self.unsynced >= DEVICE_SYNC_INTERVAL {
+            if self.unsynced >= self.sync_horizon {
                 self.sync_devices();
             }
         }
@@ -346,6 +355,7 @@ impl Machine {
         self.board.advance(self.unsynced);
         self.unsynced = 0;
         self.cpu.tb_enabled = self.board.mpc.timebase_enabled();
+        self.sync_horizon = self.board.cycles_until_event().clamp(1, MAX_SYNC_INTERVAL);
     }
 
     fn trace_instruction(&mut self, pc: u32) {
