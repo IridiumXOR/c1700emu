@@ -554,6 +554,7 @@ impl Cpu {
                     log::warn!("checkstop: machine check at pc={pc:#010x} with MSR[ME]=0");
                     return StepOutcome::Checkstop;
                 }
+                log::debug!(target: "exception", "machine check at pc={pc:#010x}, data address {addr:x?}, LR={:#010x}", self.lr);
                 if let Some(a) = addr {
                     self.dar = a;
                 }

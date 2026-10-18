@@ -85,16 +85,16 @@ other devices; still to decode.
 | What | Evidence | Probable cause / next step |
 |------|----------|----------------------------|
 | ~~`Processor board ID 0000 (1314672220)`~~ | `show version` | fixed: the serial lives at cookie 0x18 in Cisco format (chapter 4); now `EMU1234C170` |
-| 5 machine checks | `--stats` exceptions | probably bus probes of absent devices (normal on hardware); identify the PCs |
-| slot registers at 0x68030000, 0x68040000, 0x68080000, 0x680B0000 | each written twice with 0x05 and read twice; logged as unknown devices | WIC/VIC slot control registers (4 slots on a 1760). IOS probes 0x68040000 for slot 1 where Dynamips says 0x68031000: IOS wins |
-| IO FPGA registers 0x0A, 0x0C, 0x1C, 0x5C, 0x6C | first touched on the 1760 | meaning unknown; currently plain latches |
+| ~~5 machine checks~~ | `--stats` exceptions | explained (chapter 19.3): deliberate probes past the end of RAM and flash, by ROMMON and by IOS's `probe_address`; faithful |
+| ~~slot registers at 0x68030000, 0x68040000, 0x68080000, 0x680B0000~~ | each written twice with 0x05 and read twice | explained (chapter 19.1): the presence test for voice cards in the four slot windows; modelled as empty slots |
+| ~~IO FPGA registers 0x0A, 0x0C, 0x1C, 0x5C, 0x6C~~ | first touched on the 1760 | decoded (chapter 19.2): slot 3 control, slot resets, voice TDM routing; latches are right without cards |
 | IO FPGA 0x04 read 71 000×, 0x14 read/written 19 000×; WIC select 0x18 down from 10 974 to 414 accesses with SPI working | `--stats` CPLD table | 0x04 = board/CPU type (polled); 0x14 bits partly known (NVRAM write protect) |
 
 ## 10.4 For a complete router (after the prompt)
 
 | Area | What | Why |
 |------|------|-----|
-| Networking | ✅ receive path (IDMA, chapter 13): IOS pings the virtual host. Missing: host bridge / port forward (TAP or NAT) | telnet into the router from the PC, TFTP from IOS to a real server |
+| Networking | ✅ receive path (IDMA, chapter 13): IOS pings the virtual host. ✅ TAP devices and UDP tunnels (chapter 18) | telnet into the router from the PC, TFTP from IOS to a real server |
 | WAN cards | CPM **SCC** in HDLC mode + WIC-1T/2T: EEPROM contents over SPI (now working), slot registers | serial interfaces |
 | AUX port | channel B exists; give it its own TCP port | modem/aux line |
 | Watchdog | software watchdog (IOS services SWSR ~42 000× per boot) | fidelity (not needed to run) |

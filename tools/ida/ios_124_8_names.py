@@ -62,6 +62,49 @@ FUNCS = {
                  "Xilinx slave-serial configuration through IO FPGA reg 0x4C (buf, len): PROG_B pulse (0x40), "
                  "wait INIT_B (0x08, no timeout), send bytes MSB first, check DONE (0x02), retry x4. "
                  "Bitstream for the 1760 at 0x83426FD0 (XC2S200, 166980 bytes). (docs ch. 11.6)"),
+    # ---- WIC/VIC slots and the IO FPGA (docs ch. 19) ----
+    0x80504F1C: ("wic_slot_count",
+                 "Number of WIC/VIC slots for the mainboard PM ID: 1720 (0xB2) / 1721 (0x35A) 2, "
+                 "1750 (0xC9) / 1751 (0x24D) 3, 1760 (0x316) 4. (docs ch. 19)"),
+    0x80140A08: ("slot_probe_voice_cards",
+                 "Per slot (bases 0x68030000, 0x68040000, 0x68080000 on 1750/1751/1760, 0x680B0000 on 1760): "
+                 "write 0x05 to the slot register, wait, read back; 0x0A (low nibble inverted) = a card with "
+                 "its own logic (voice) -> bit in slot_voice_present. An empty slot floats at 0xFF. (docs ch. 19)"),
+    0x80396348: ("wic_slot_status_poll",
+                 "wic_slot_status_poll(bay, slot, base): reads the slot status register at base+5; bits 0x20/0x40 "
+                 "signal interface up/down for card types 0x3FA-0x3FD, 0x473, 0x474; writes it back with bit 7 clear. "
+                 "(docs ch. 19)"),
+    0x8014B8F0: ("slot0_status_poll", "wic_slot_status_poll(0, 0, 0x68030000)"),
+    0x8014B91C: ("slot1_status_poll", "wic_slot_status_poll(0, 1, 0x68040000)"),
+    0x8014B948: ("slot2_status_poll", "wic_slot_status_poll(0, 2, 0x68080000)"),
+    0x8014B974: ("slot3_status_poll", "wic_slot_status_poll(0, 3, 0x680B0000)"),
+    0x801405BC: ("wic_slot_reset_pulse",
+                 "Reset pulse for one slot: slot 0 = IO FPGA reg 0x1C bit 0x20, slots 1/2 = reg 0x18 bits 0/1, "
+                 "slot 3 = reg 0x0A bit 0; high for busy_delay(20). (docs ch. 19)"),
+    0x80504B8C: ("wic_slot_select",
+                 "Set a slot's device select field from the table at 0x8268A74C: reg 0x18 for slots 0-2, "
+                 "reg 0x0A for slot 3 (the 1760's fourth slot). (docs ch. 19)"),
+    0x8013EF88: ("c17xx_slots_init",
+                 "1751/1760 slot hardware init: load the FPGA bitstream (1760: XC2S200 166980 bytes, else XC2S100 "
+                 "97652), set reg 0x14 bits 0x40/0x80 for voice cards in slots 0/1, voice_tdm_init, then pulse every "
+                 "slot reset at once. (docs ch. 19)"),
+    0x8013E4F4: ("voice_tdm_init",
+                 "IO FPGA voice TDM init: reg 0x5C (low bits = 1 on 1751, bit 0x80 on 1760, bit 0x20 enable), "
+                 "reg 0x6C = 0x80, reg 0x48 = 4. (docs ch. 19)"),
+    0x800DC690: ("tsa_route_voice_port",
+                 "Route a voice port to a TSA (MPC860 SI time slot assigner): reg 0x48 nibbles, reg 0x5C port bits "
+                 "0x08/0x10, reg 0x14 bits 0x40/0x80; prints 'TSA %d <--- port %d/%d'. (docs ch. 19)"),
+    0x8062826C: ("dsp_timeslot_program",
+                 "Program DSP time slots: reg 0x70/0x74 masks, then reg 0x6C = slot | 0x40 per time slot. (docs ch. 19)"),
+    0x80122110: ("iofpga_reg0c_init", "IO FPGA reg 0x0C = 0 on 1751/1760/0x288/0x496/0x1A8 (meaning unknown). (docs ch. 19)"),
+    0x81BC7F80: ("probe_address",
+                 "probe_address(addr): installs a temporary machine check handler (vector 0x200, via "
+                 "sub_80613D8C), reads addr, returns 0 if the read faulted. Used by the memory dump (prints XX) "
+                 "and by platform init to find the end of the flash (0x62000000 on a 32 MB 1760): these are "
+                 "the machine checks seen during boot. (docs ch. 19)"),
+    0x80123944: ("fpga_firmware_register",
+                 "Registers the FPGA 'firmware' image: the longer length when no voice card is present "
+                 "(slot_voice_present == 0) and IO FPGA reg 0x20 bits 0x40/0x80 are clear. (docs ch. 19)"),
 }
 
 DATA = {
@@ -74,6 +117,8 @@ DATA = {
     0x8355D48C: ("platform_string_8", None),
     0x8355D498: ("processor_board_id_str", "'Processor board ID' text, built from the cookie serial"),
     0x835B6FF0: ("iofpga_reg4c_shadow", "shadow of IO FPGA register 0x4C (FPGA configuration port)"),
+    0x8306B9E0: ("slot_voice_present", "bit n = slot n answered the 0x05 -> 0x0A presence test (voice card)"),
+    0x8268A74C: ("wic_slot_select_table", "per slot and device: select bits for IO FPGA reg 0x18 / 0x0A"),
 }
 
 COMMENTS = {

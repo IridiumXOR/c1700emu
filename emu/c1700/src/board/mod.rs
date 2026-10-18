@@ -29,7 +29,7 @@ pub mod nvram;
 pub mod uart16550;
 
 use crate::mpc860::Mpc860;
-use crate::net::{NetConfig, VirtualNetwork};
+use crate::net::{Link, NetConfig, VirtualNetwork};
 use flash::Flash;
 use iobus::IoBus;
 use ppc8xx::jit::CodeWatch;
@@ -96,8 +96,8 @@ pub struct Board {
     map: Vec<Region>,
     /// Cached level of the CPU's external interrupt input.
     irq_line: bool,
-    /// What the Ethernet port is plugged into.
-    pub net: Option<VirtualNetwork>,
+    /// What the Ethernet port is plugged into (`None`: unplugged).
+    pub net: Option<Link>,
     /// Virtual time in CPU cycles (drives the network's timers).
     now_cycles: u64,
     last_net_poll: u64,
@@ -149,7 +149,7 @@ impl Board {
             io: IoBus::new(nvram, cfg.board_id),
             map: vec![Region::Stale; NUM_PAGES],
             irq_line: false,
-            net: cfg.net.clone().map(VirtualNetwork::new),
+            net: cfg.net.clone().map(|c| Link::Virtual(Box::new(VirtualNetwork::new(c)))),
             now_cycles: 0,
             last_net_poll: 0,
             watch: None,

@@ -5,15 +5,17 @@ Chapter references are to `docs/`.
 
 ## Emulator: hardware and features
 
-- [ ] **1. Network bridge to the real LAN** *(in progress)*: only the
-      built-in virtual network exists (one host 10.0.2.2: ARP, ping, TFTP).
-- [ ] **2. WIC/VIC slot hardware** *(in progress)*: IOS writes to unknown
-      devices at 0x68030000, 0x68040000, 0x68080000, 0x680B0000; the slot ID
-      EEPROMs answer "empty"; the SPI chip selects for slots 2/3 aren't modelled.
-- [ ] **3. IO FPGA registers** 0x0A, 0x0C, 0x1C, 0x5C, 0x6C *(in progress)*:
-      accessed by IOS, meaning unknown.
-- [ ] **4. The 5 machine checks IOS takes during boot** *(in progress)*:
-      never investigated.
+- [x] 1. Network bridge: `--net tap:NAME` and `--net udp:...`, `--mac`
+      (chapter 18). Two emulated routers ping each other over UDP.
+  - [ ] 1a. Try TAP on a real host network (needs `sudo ip tuntap add`,
+        chapter 18.2); only the UDP path is tested so far.
+- [x] 2. WIC/VIC slots understood and modelled as empty slots (chapter 19.1).
+  - [ ] 2a. Emulate a real card, e.g. WIC-1T: ID EEPROM contents over SPI
+        plus the CPM SCC in HDLC mode (serial interfaces).
+- [x] 3. IO FPGA registers decoded (chapter 19.2); latches are right
+      without cards.
+- [x] 4. The 5 boot-time machine checks: deliberate probes past the end
+      of RAM and flash, faithful (chapter 19.3).
 - [ ] 5. `--aux-tcp` (AUX port over telnet) never tested with IOS.
 - [ ] 6. **Snapshots**: save the machine at `Router>`, restore in seconds
       (first item of chapter 14's plan, never done; biggest usability win).

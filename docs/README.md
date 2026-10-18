@@ -26,6 +26,8 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 15 | [Profiling and idle detection](15-profiling-and-idle.md) | guest and host profiles, how IOS idles, the idle-PC detector, results |
 | 16 | [Making the interpreter faster](16-interpreter-optimisations.md) | the benchmark, each optimisation with its measured effect, exact ROM accelerators, what is left |
 | 17 | [A JIT compiler](17-jit.md) | `--cpu jit`: Cranelift translation of hot blocks, exactness rules, self-modifying code, verification (incl. mutation testing), results |
+| 18 | [Real networks](18-real-networks.md) | `--net tap:`/`udp:`: TAP devices, UDP tunnels between emulators (two IOS routers pinging), `--mac` |
+| 19 | [Slots, IO FPGA, machine checks](19-slots-iofpga-machine-checks.md) | the WIC/VIC slot windows and their presence test, the IO FPGA registers IOS uses, why every boot takes five machine checks |
 
 Reference material:
 
@@ -44,4 +46,4 @@ Reference material:
 * `tools/ios_session.py` — drives an IOS boot and a list of commands unattended (setup dialog, `show`, `ping`...).
 * `tools/ios_refs.py` — finds code referencing a string or an address in a decompressed IOS image.
 * `tools/bench.sh` — the CPU engine benchmark (power-on to 3 billion executed instructions with IOS in flash).
-* `tools/ida/ios_124_8_names.py` — IDA annotations for IOS 12.4(8) (the database stays local in `ida-ios/`).
+* `tools/ida/ios_124_8_names.py` — IDA annotations for IOS 12.4(8) (the database stays local in `ida-ios/`): scheduler, MMU, IDMA, FPGA loader, WIC/VIC slots, IO FPGA, `probe_address`.

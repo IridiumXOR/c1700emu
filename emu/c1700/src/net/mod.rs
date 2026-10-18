@@ -16,6 +16,7 @@
 //! Time is the emulator's virtual time, so retransmission timers on both
 //! sides agree no matter how fast the host is.
 
+pub mod host;
 pub mod tftp;
 
 use smoltcp::iface::{Config, Interface, SocketSet};
@@ -182,6 +183,52 @@ impl VirtualNetwork {
         if self.tftp.service(&mut self.sockets, now) {
             // the server queued replies: push them out right away
             self.iface.poll(now, &mut self.cable, &mut self.sockets);
+        }
+    }
+}
+
+/// What the router's Ethernet port is plugged into (`--net`, docs ch. 18).
+pub enum Link {
+    /// The built-in virtual host (ARP, ping, TFTP), no privileges needed.
+    Virtual(Box<VirtualNetwork>),
+    /// A TAP device or a UDP tunnel.
+    Host(host::HostLink),
+}
+
+impl Link {
+    pub fn guest_transmit(&mut self, frame: Vec<u8>) {
+        match self {
+            Link::Virtual(v) => v.guest_transmit(frame),
+            Link::Host(h) => h.guest_transmit(frame),
+        }
+    }
+
+    pub fn peek_for_guest(&self) -> Option<&Vec<u8>> {
+        match self {
+            Link::Virtual(v) => v.peek_for_guest(),
+            Link::Host(h) => h.peek_for_guest(),
+        }
+    }
+
+    pub fn pop_for_guest(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Link::Virtual(v) => v.pop_for_guest(),
+            Link::Host(h) => h.pop_for_guest(),
+        }
+    }
+
+    /// Is a poll useful now? (Host links: always, it is just a `try_recv`.)
+    pub fn wants_poll(&self, now_us: u64) -> bool {
+        match self {
+            Link::Virtual(v) => v.wants_poll(now_us),
+            Link::Host(_) => true,
+        }
+    }
+
+    pub fn poll(&mut self, now_us: u64) {
+        match self {
+            Link::Virtual(v) => v.poll(now_us),
+            Link::Host(h) => h.poll(),
         }
     }
 }

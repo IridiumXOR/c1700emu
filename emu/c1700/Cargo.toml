@@ -20,3 +20,4 @@ powerpc = "0.4"
 smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-udp", "socket-icmp", "auto-icmp-echo-reply"] }
 crc32fast = "1.5.2"
 tftp-packet = "0.1"
+tun-tap = { version = "0.1.4", default-features = false }

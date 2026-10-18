@@ -96,6 +96,11 @@ pub fn set_serial(nvram: &mut [u8], serial: &str) -> Result<bool, String> {
     Ok(patch(nvram, |data| data[SERIAL..SERIAL + 9].copy_from_slice(&bytes)))
 }
 
+/// Set the Ethernet MAC address in both cookie copies.
+pub fn set_mac(nvram: &mut [u8], mac: [u8; 6]) -> bool {
+    patch(nvram, |data| data[0x02..0x08].copy_from_slice(&mac))
+}
+
 pub fn pm_id_for_model(model: &str) -> Option<u16> {
     MODELS.iter().find(|(m, _)| *m == model).map(|&(_, id)| id)
 }

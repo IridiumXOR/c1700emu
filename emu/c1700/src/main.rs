@@ -17,7 +17,8 @@ use c1700emu::console::Console;
 use c1700emu::emulator::Emulator;
 use c1700emu::gdb;
 use c1700emu::machine::{CpuEngine, Machine};
-use c1700emu::net::NetConfig;
+use c1700emu::net::host::HostLink;
+use c1700emu::net::{Link, NetConfig};
 use clap::Parser;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,11 @@ struct Args {
     /// format LLLYYWWSSSS, e.g. FTX0945W0MY. Default for a new NVRAM: EMU1234C170.
     #[arg(long)]
     serial: Option<String>,
+
+    /// Ethernet MAC address written into the cookie, e.g. 02:17:00:00:00:02
+    /// (default 02:17:00:00:00:01; give each router on a link its own).
+    #[arg(long, value_parser = parse_mac)]
+    mac: Option<[u8; 6]>,
 
     /// Internal flash size in MB: 4 (2 x AMD Am29F016), 8, 16 or 32 (Intel
     /// StrataFlash x16). Default: 32 for 1751/1760, 16 otherwise.
@@ -89,9 +95,17 @@ struct Args {
     #[arg(long, default_value_t = 24)]
     net_prefix: u8,
 
-    /// Leave the Ethernet port unplugged (no virtual network).
+    /// Leave the Ethernet port unplugged (same as `--net none`).
     #[arg(long)]
     no_net: bool,
+
+    /// What the Ethernet port is plugged into: `virtual` (the built-in host
+    /// 10.0.2.2 with ping and TFTP; default), `none`, `tap:NAME` (an
+    /// existing Linux TAP device, e.g. bridged to the LAN) or
+    /// `udp:LPORT:RHOST:RPORT` (each frame one UDP datagram, as Dynamips and
+    /// GNS3 do). See docs ch. 18.
+    #[arg(long, default_value = "virtual", value_parser = parse_net)]
+    net: NetChoice,
 
     /// Also serve the console over telnet on this TCP port.
     #[arg(long)]
@@ -242,7 +256,7 @@ fn main() -> Result<(), String> {
     let rom_path = find_file(&args.rom);
     let rom = std::fs::read(&rom_path).map_err(|e| format!("cannot read ROM {}: {e}", rom_path.display()))?;
 
-    let net = (!args.no_net).then(|| NetConfig {
+    let net = (args.net == NetChoice::Virtual && !args.no_net).then(|| NetConfig {
         server_ip: args.net_server_ip,
         gateway_ip: args.net_gateway,
         prefix_len: args.net_prefix,
@@ -260,11 +274,25 @@ fn main() -> Result<(), String> {
     if let Some(serial) = &args.serial {
         cookie::set_serial(nvram.bytes_mut(), serial)?;
     }
+    if let Some(mac) = args.mac {
+        cookie::set_mac(nvram.bytes_mut(), mac);
+    }
     if let Some(cr) = args.confreg {
         write_confreg(&mut nvram, cr);
     }
 
     let mut machine = Machine::new(rom, &cfg, nvram);
+    let host_link = match &args.net {
+        _ if args.no_net => None,
+        NetChoice::Tap(name) => Some(HostLink::tap(name)),
+        NetChoice::Udp(port, remote) => Some(HostLink::udp(*port, *remote)),
+        NetChoice::Virtual | NetChoice::None => None,
+    };
+    if let Some(link) = host_link {
+        let link = link.map_err(|e| e.to_string())?;
+        log::info!("Ethernet port connected to {}", link.what);
+        machine.board.net = Some(Link::Host(link));
+    }
     machine.set_engine(args.cpu, args.jit_threshold);
     machine.trace = args.trace;
     if args.no_fast_forward {
@@ -333,6 +361,42 @@ fn main() -> Result<(), String> {
     eprint!("{report}"); // restores the terminal and saves NVRAM
     eprintln!();
     Ok(())
+}
+
+fn parse_mac(s: &str) -> Result<[u8; 6], String> {
+    let bytes: Vec<u8> = s.split([':', '-']).map(|b| u8::from_str_radix(b, 16)).collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+    bytes.try_into().map_err(|_| "expected six hex bytes, e.g. 02:17:00:00:00:02".to_string())
+}
+
+/// `--net`.
+#[derive(Clone, Debug, PartialEq)]
+enum NetChoice {
+    Virtual,
+    None,
+    Tap(String),
+    Udp(u16, std::net::SocketAddr),
+}
+
+fn parse_net(s: &str) -> Result<NetChoice, String> {
+    use std::net::ToSocketAddrs;
+    match s {
+        "virtual" => Ok(NetChoice::Virtual),
+        "none" => Ok(NetChoice::None),
+        _ => {
+            if let Some(name) = s.strip_prefix("tap:").filter(|n| !n.is_empty()) {
+                return Ok(NetChoice::Tap(name.to_string()));
+            }
+            let spec = s.strip_prefix("udp:").ok_or("expected virtual, none, tap:NAME or udp:LPORT:RHOST:RPORT")?;
+            let (local, remote) = spec.split_once(':').ok_or("expected udp:LPORT:RHOST:RPORT")?;
+            let local = local.parse().map_err(|e| format!("bad local port {local:?}: {e}"))?;
+            let remote = remote
+                .to_socket_addrs()
+                .map_err(|e| format!("bad remote {remote:?}: {e}"))?
+                .next()
+                .ok_or_else(|| format!("{remote:?} does not resolve"))?;
+            Ok(NetChoice::Udp(local, remote))
+        }
+    }
 }
 
 fn parse_watch(s: &str) -> Result<(u32, u32), String> {

@@ -432,6 +432,14 @@ impl Machine {
         for (r, rd, wr, v) in self.board.io.cpld.used_registers() {
             out += &format!("  {r:#04x} r={rd:<10} w={wr:<8} value={v:#04x}\r\n");
         }
+        let slots = self.board.io.slot_access;
+        if slots.iter().any(|&(r, w, _)| r + w > 0) {
+            out += "WIC/VIC slots (all empty: reads float to 0xFF):";
+            for (i, (r, w, v)) in slots.iter().enumerate() {
+                out += &format!(" slot {i} r={r} w={w} last={v:#04x};");
+            }
+            out += "\r\n";
+        }
         if !self.board.io.unknown.is_empty() {
             out += "unknown I/O bus devices (offset from 0x68000000: reads/writes/last written):\r\n";
             for (off, (r, w, v)) in &self.board.io.unknown {

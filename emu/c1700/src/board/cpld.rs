@@ -1,18 +1,28 @@
 //! The board CPLD at 0x68020000 (8-bit registers).
 //!
-//! Only partially understood; what the ROM tells us so far:
+//! Only partially understood. From the ROM (R) and IOS 12.4(8) on a 1760
+//! (I, docs ch. 19):
 //!
 //! | reg  | known use                                                     |
 //! |------|---------------------------------------------------------------|
-//! | 0x00 | bit 7: system LED (blinked N times by `fatal_error_blink`)    |
-//! | 0x04 | bits 0-2: board type (ROM special-cases 2, 3 and 4)          |
-//! | 0x14 | bit 0: NVRAM write protect, bit 2: flag set at every boot     |
-//! | 0x18 | bit 0: set right before the CPM is reset                      |
-//! | 0x24 | initialised to 0xFF                                           |
-//! | 0x48 | bit 3: second LED on board type 2; initialised to 0xD8        |
+//! | 0x00 | bit 7: system LED (blinked N times by `fatal_error_blink`) (R) |
+//! | 0x04 | bits 0-2: board type (ROM special-cases 2, 3 and 4) (R)       |
+//! | 0x0A | slot 3 (1760): bit 0 reset pulse, device select field (I)     |
+//! | 0x0C | written once at init: 0 on 1751/1760 (I), meaning unknown     |
+//! | 0x10 | bit 3: VPN module fitted (IOS reserves its buffers) (I)       |
+//! | 0x14 | bit 0: NVRAM write protect, bit 2: flag set at every boot (R); bits 6/7: voice card in slot 0/1 (I) |
+//! | 0x18 | bit 0: set right before the CPM is reset (R); slots 1/2 reset pulse (bits 0/1) and slot 0-2 device selects, incl. the WIC ID EEPROM selects 0x08/0x20 (I) |
+//! | 0x1C | bit 5: slot 0 reset pulse (I)                                 |
+//! | 0x20 | bits 6/7: read when choosing the FPGA image size (I)          |
+//! | 0x24 | initialised to 0xFF (R)                                       |
+//! | 0x48 | bit 3: second LED on board type 2; initialised to 0xD8 (R); voice TDM: TSA routing nibbles (I) |
 //! | 0x4C | FPGA configuration port (IOS on the 1760), see `fpga_config`  |
+//! | 0x5C | voice TDM control: port bits 0x08/0x10, 0x20 enable, 0x80 on the 1760 (I) |
+//! | 0x6C | DSP time-slot programming strobe (slot \| 0x40), 0x80 at init (I) |
+//! | 0x70, 0x74 | DSP time-slot masks (I)                                |
 //!
-//! Everything else behaves as a read/write latch.
+//! Everything else behaves as a read/write latch, which is all the slot
+//! and voice registers need without cards or DSPs fitted.
 
 use super::fpga_config::FpgaConfigPort;
 
