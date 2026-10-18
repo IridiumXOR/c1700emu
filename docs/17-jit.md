@@ -476,7 +476,8 @@ self-decompression; accelerators and idle detection off):
 | flash read directly (17.15) | | +17% (349.6 → 408.7 in one A/B session) |
 | `Board::fetch` always inlined (17.9) | 35.8 | 414 |
 | devices synced at events (17.16) | **36.3** | 655 (82.7 s vs 4.6 s) |
-| compiling in the background (17.17) | | **673** (**4.5 s**) |
+| compiling in the background (17.17) | | 673 (4.5 s) |
+| registers carried from block to block (17.18) | | +3.5% (679 → 703 in one A/B session) |
 
 (Absolute numbers move by a few percent from one day to the next with
 the machine's state: the old binary gave 297-300 MIPS in the session of
@@ -877,18 +878,62 @@ concurrently.
 `self_modifying_code` fail (stale code gets installed); never installing
 results makes all background runs and the takeover test fail.
 
-## 17.18 What limits it, and next steps
+## 17.18 Step 15: registers carried from block to block
 
-`perf record -e cycles:u` of the benchmark (after 17.16; 17.17 moved compiling off the emulation thread): **84%
-translated code**; the dispatcher, the interpreter, Cranelift compiling
-and the devices are 1% or less each. From here on, speed comes from the
-quality of the generated code:
+A profile by guest code needs names for the JIT's functions.
+`C1700_PERF_MAP=1` makes the emulator append one line per compiled region
+to `/tmp/perf-PID.map`, the file `perf report` reads, naming it after its
+guest address (Cranelift itself writes anonymous `.LfnN` names there under
+`perf record`). For the benchmark:
 
-* CR fields are still built bit by bit after every compare and record
-  form (`cmp` + three `setcc` + shifts and ors); deferring the CR build
-  until something reads it would remove most of that.
-* Registers are stored at the end of every guest block (17.13); keeping
-  them across the internal jumps of a loop would need a smarter
-  allocation than the whole-region attempt.
-* Memory accesses check the fast table on every access, even for the
-  same page as the previous access in the block.
+| region | share | what |
+|---|---|---|
+| `guest_8000a488` | 18% | IOS's decompressor (inflate), 45 short blocks |
+| `guest_fff1683c` | 13% | ROMMON's memory clear (the loop of 17.4) |
+| `guest_fff04690` | 10% | ROMMON |
+| `guest_80009e30` | 9% | IOS's delay loop |
+
+The decompressor's blocks are 2-15 instructions long, and every block
+began by reloading each register it used from the `Cpu` struct, where the
+previous block had just stored it (17.13). In a chain of short blocks
+that is a store and a load per register and block, and the load waits
+for the store.
+
+Now the region loads every register it uses **once, at entry**, and the
+values travel from block to block in Cranelift variables (the SSA builder
+turns them into block arguments where paths meet). The stores at block
+ends stay, so the struct is still exact at every exit and exception
+(17.13's precise-state argument is unchanged); only the reloads go. After
+an interpreter helper call the carried registers are reloaded, since the
+interpreter may have changed any of them. Knowing the set of used
+registers before emitting the entry needs a first pass, as in 17.13's
+discarded attempt; this time only the loads move, so register pressure
+stays where Cranelift can deal with it.
+
+**Measured** (one A/B session, three runs each): **679 → 703 MIPS**
+(+3.5%), and less code (482 KB instead of 515 KB). Removing the reload
+after helper calls makes five JIT tests fail; the whole IOS boot passes
+the lockstep check (17.12): 66,688,677 region runs, all identical.
+
+## 17.19 What limits it, and what was looked at
+
+The benchmark now spends ~80% of its time in translated code, most of it
+in a handful of IOS and ROMMON loops (the table above). Two more ideas
+were examined and dropped:
+
+* **Deferring the CR update** after a compare until something reads it.
+  The CR must be exact in the struct wherever an exception can happen and
+  at every block end. In the hot loops a memory access precedes the
+  compare in the same block (the memory clear: `stb`, `addi`, `cmplw`,
+  `blt`), so the field is live at that fault point anyway; deferral would
+  only save work when two compares write the same field with nothing that
+  can fault or leave in between, which these loops don't do. The branch
+  already tests the comparison itself (17.13).
+* **Skipping fast-table lookups** for a second access to the same page.
+  A lookup is one load and one compare; proving that two addresses share a
+  page costs about as much.
+
+What remains is the plain cost of the guest code: each guest instruction
+becomes 2-10 host instructions, and a memory access ~10 (table lookup,
+byte swap). Going further would mean a different design (translating
+whole loops with their memory accesses hoisted), which isn't planned.

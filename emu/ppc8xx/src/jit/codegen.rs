@@ -18,9 +18,12 @@
 //! where the struct must be current: at the end of the guest block, before
 //! an interpreter helper call, and in the exit stubs (each stub stores the
 //! registers dirty at its own exit point, so exceptions stay precise).
-//! Between guest blocks everything is in memory: keeping registers live
-//! across a whole region was tried and is slower on x86-64 (too few host
-//! registers; docs ch. 17.13).
+//! The struct is therefore current at every block edge. The registers a
+//! region uses are loaded once at its entry and their values travel from
+//! block to block in the variables (docs ch. 17.18), so blocks don't reload
+//! what the previous one just stored. (Also deferring the stores to the
+//! region's exits was tried and is slower on x86-64: too few host
+//! registers; docs ch. 17.13.)
 //!
 //! **Memory accesses** look the page up in a fast table (one load and one
 //! compare). On a hit the access is one host load or store; on a miss, a
@@ -196,8 +199,19 @@ impl Compiler {
     pub fn compile(&mut self, region: &[GuestBlock], links: *mut Link) -> Result<(RegionCode, Vec<Option<u32>>), String> {
         let dump = log::log_enabled!(target: "jit_ir", log::Level::Trace);
         self.ctx.set_disasm(dump);
+        // Pass 1 finds the registers the region uses; pass 2 loads them once
+        // at entry and carries them from block to block (docs ch. 17.18).
+        let (used, _) = self.build(region, links, 0);
+        let (_, link_targets) = self.build(region, links, used);
+        let ir = if dump { self.ctx.func.display().to_string() } else { String::new() };
+        self.finish_compile(region, dump, ir, link_targets)
+    }
+
+    /// Build the region's IR into `self.ctx.func`, carrying the registers in
+    /// `carry` across its blocks; returns the registers it used and the
+    /// link targets.
+    fn build(&mut self, region: &[GuestBlock], links: *mut Link, carry: u64) -> (u64, Vec<Option<u32>>) {
         self.ctx.func = Function::with_name_signature(UserFuncName::default(), self.block_sig.clone());
-        let link_targets;
         {
             let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
             let entry = b.create_block();
@@ -226,6 +240,8 @@ impl Compiler {
                 vars: [None; SLOTS],
                 loaded: 0,
                 dirty: 0,
+                carry,
+                used: 0,
                 cr_cache: [None; 8],
                 labels: Vec::new(),
                 stubs: Vec::new(),
@@ -238,9 +254,11 @@ impl Compiler {
             t.emit_stubs();
             t.b.seal_all_blocks();
             t.b.finalize(self.module.target_config());
-            link_targets = t.link_targets;
+            (t.used, t.link_targets)
         }
-        let ir = if dump { self.ctx.func.display().to_string() } else { String::new() };
+    }
+
+    fn finish_compile(&mut self, region: &[GuestBlock], dump: bool, ir: String, link_targets: Vec<Option<u32>>) -> Result<(RegionCode, Vec<Option<u32>>), String> {
         let id = self.module.declare_anonymous_function(&self.block_sig).map_err(|e| e.to_string())?;
         self.module.define_function(id, &mut self.ctx).map_err(|e| format!("{e:?}"))?;
         if dump {
@@ -255,10 +273,32 @@ impl Compiler {
             let host = self.ctx.compiled_code().and_then(|c| c.vcode.clone()).unwrap_or_default();
             log::trace!(target: "jit_ir", "region at {:#010x}, {} blocks\n{guest}--- Cranelift IR ---\n{ir}--- host code ---\n{host}", region[0].start, region.len());
         }
-        self.code_bytes += self.ctx.compiled_code().map_or(0, |c| c.code_info().total_size as usize);
+        let size = self.ctx.compiled_code().map_or(0, |c| c.code_info().total_size as usize);
+        self.code_bytes += size;
         self.module.clear_context(&mut self.ctx);
         self.module.finalize_definitions().map_err(|e| e.to_string())?;
-        Ok((self.module.get_finalized_function(id), link_targets))
+        let code = self.module.get_finalized_function(id);
+        perf_map(code, size, region[0].start);
+        Ok((code, link_targets))
+    }
+}
+
+/// With `C1700_PERF_MAP` set, name each region for Linux `perf` in
+/// `/tmp/perf-PID.map` (the file `perf report` looks for), as
+/// `guest_XXXXXXXX` after its guest address (docs ch. 17.18). Cranelift
+/// itself appends anonymous names there when `PERF_BUILDID_DIR` is set (as
+/// `perf record` does), so the file is appended to, not replaced.
+fn perf_map(code: *const u8, size: usize, guest_pc: u32) {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    static MAP: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        std::env::var_os("C1700_PERF_MAP")?;
+        let path = format!("/tmp/perf-{}.map", std::process::id());
+        std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(Mutex::new)
+    });
+    if let Some(file) = map {
+        let _ = writeln!(file.lock().unwrap(), "{:x} {size:x} guest_{guest_pc:08x}", code as usize);
     }
 }
 
@@ -372,6 +412,12 @@ struct Tx<'a> {
     loaded: u64,
     /// Slots written since they were last stored to the struct.
     dirty: u64,
+    /// Slots loaded once at the region's entry and carried from block to
+    /// block (their values stay in variables across internal jumps; the
+    /// struct is still updated at block ends).
+    carry: u64,
+    /// Slots read or written (pass 1 of `Compiler::compile`).
+    used: u64,
     /// Per CR field: the (LT, GT, EQ) comparison results that produced it,
     /// while still valid, so a following branch tests them directly.
     cr_cache: [Option<[Value; 3]>; 8],
@@ -404,6 +450,7 @@ impl Tx<'_> {
     }
 
     fn read(&mut self, slot: usize) -> Value {
+        self.used |= 1 << slot;
         let var = self.var(slot);
         if self.loaded & (1 << slot) == 0 {
             let v = self.b.ins().load(I32, MemFlagsData::trusted(), self.cpu, slot_offset(slot));
@@ -414,12 +461,22 @@ impl Tx<'_> {
     }
 
     fn write(&mut self, slot: usize, v: Value) {
+        self.used |= 1 << slot;
         let var = self.var(slot);
         self.b.def_var(var, v);
         self.loaded |= 1 << slot;
         self.dirty |= 1 << slot;
         if slot == CR {
             self.cr_cache = [None; 8];
+        }
+    }
+
+    /// Load the registers in `slots` from the struct into their variables.
+    fn load_slots(&mut self, slots: u64) {
+        for slot in (0..SLOTS).filter(|s| slots & (1 << s) != 0) {
+            let var = self.var(slot);
+            let v = self.b.ins().load(I32, MemFlagsData::trusted(), self.cpu, slot_offset(slot));
+            self.b.def_var(var, v);
         }
     }
 
@@ -618,6 +675,7 @@ impl Tx<'_> {
         }
         // Steps count from those done by the regions chained before this one.
         self.b.def_var(self.steps, done);
+        self.load_slots(self.carry);
         // Jump to the entry block: a jump table indexed by `entry`. Every
         // edge needs its own BlockCall (the SSA builder appends variable
         // arguments to each), so the default target gets a separate one.
@@ -628,9 +686,10 @@ impl Tx<'_> {
         let labels = self.labels.clone();
         for (block, &(_, label, _)) in region.iter().zip(&labels) {
             self.b.switch_to_block(label);
-            // A guest block can be entered from several places: it re-reads
-            // the registers it uses (they are in the struct at block edges).
-            self.loaded = 0;
+            // A guest block can be entered from several places: carried
+            // registers arrive in variables, the others are re-read (the
+            // struct is up to date at block edges).
+            self.loaded = self.carry;
             self.dirty = 0;
             self.cr_cache = [None; 8];
             self.guest_block(block);
@@ -793,7 +852,9 @@ impl Tx<'_> {
         let (w, p) = (self.c(word), self.c(pc));
         let call = self.b.ins().call_indirect(self.sig_exec, f, &[self.ctx, w, p]);
         let status = self.b.inst_results(call)[0];
-        self.loaded = 0;
+        // Carried registers must be fresh on every path out of here.
+        self.load_slots(self.carry);
+        self.loaded = self.carry;
         self.cr_cache = [None; 8];
         let join = self.b.create_block();
         self.after_helper(status, steps, pc, |_| {}, join);

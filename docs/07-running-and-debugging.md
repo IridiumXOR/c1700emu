@@ -148,6 +148,10 @@ execution profile: 183398691 instructions in ROM
 `--trace --log trace.txt -n 100000` writes `pc: word  disassembly` for every
 instruction (disassembly by the `powerpc` crate).
 
+With the JIT, host profilers see generated code. `C1700_PERF_MAP=1 perf
+record -e cycles:u -- c1700emu --cpu jit ...` names every translated region
+after its guest address (`guest_8000a488`) in `perf report` (chapter 17.18).
+
 ## 7.5 Tests
 
 ```bash

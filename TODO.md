@@ -26,7 +26,7 @@ Chapter references are to `docs/`.
       bare RETURN); `--idle warp` is back; a snapshot/idle-detection bug
       found on the way is fixed (chapter 21, tools/tests/warp_test.py).
 
-## JIT (chapter 17.18)
+## JIT (chapter 17.19)
 
 - [x] 8. Flash read directly in read-array mode (`host_page` + a cheap
       `host_page_epoch` that only empties the fast tables when a command
@@ -63,6 +63,11 @@ Chapter references are to `docs/`.
       instead of up to 626 ms, IOS to `Router>` (--idle off) 18.8 s
       (chapter 17.17).
 
+- [x] 20. Found on the way: per-region JIT profiles (`C1700_PERF_MAP=1`
+      names regions for `perf`); registers carried from block to block
+      inside a region (loaded once at entry, still stored at block ends):
+      +3.5% (chapter 17.18). CR deferral and fast-table lookup sharing
+      examined and dropped, with the reasons (chapter 17.19).
 - [x] 19. Found on the way: the WIC-2T (two ports, SCC1/SCC4 and
       SCC2/SCC3) and DCE cables (`--serial0 udp:...,dce`); two routers
       cabled twice with a DCE end each (chapter 23.7,
