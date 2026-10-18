@@ -40,8 +40,10 @@ Chapter references are to `docs/`.
 - [x] 12. `--cpu jit-check`: every region run verified against the interpreter
       (record + replay), chapter 17.12; all JIT tests and the ROMMON boot
       run in check mode too.
-- [ ] 13. The interpreter is ~2% slower with the JIT built in, even unused
-      (mostly code layout; 2% unexplained, chapter 17.9).
+- [x] 13. The interpreter was slower with the JIT built in (7% by then):
+      LLVM stopped inlining `Board::fetch` into the interpreter loop once
+      the JIT called it too; now `#[inline(always)]`, interpreter 32.0 →
+      35.8 MIPS (chapter 17.9).
 
 ## IDA and docs
 

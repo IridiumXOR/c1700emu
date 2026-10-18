@@ -360,6 +360,35 @@ shrank the gap to 2% (31.7 vs 31.0). So it is mostly where the hot loops
 land in the binary, not work the interpreter does; the remaining 2% is not
 explained yet.
 
+**Explained later** (TODO item 13). By the time of 17.15 the gap had grown
+to 7%: HEAD 33.5 MIPS, the same source with the JIT call removed from
+`Machine::run` 36.2. Two more builds narrowed it down. With one codegen
+unit and fat LTO both variants run at 34.0-34.1 MIPS, so the JIT's
+*presence* costs nothing at run time; it changes the compiler's decisions.
+A `perf` profile of the two default builds showed which decision:
+
+| default build | `Cpu::execute` | `Cpu::run_batch` | `Board::fetch` |
+|---|---|---|---|
+| without the JIT call | 45% | 36% | inlined |
+| with it | 44% | 25% | **14%, a separate function** |
+
+The interpreter fetches every instruction through `Board::fetch`. While
+the interpreter loop was its only real user, LLVM inlined it. The JIT
+calls it too (the scanner, the checker's code capture), and with several
+callers the inliner's cost model said no: one call, one return and the
+lost optimisations across the boundary, per instruction. `fetch` is a
+table lookup and a load, so it is now `#[inline(always)]`:
+
+| | interpreter (1 G instructions) | JIT (3 G) |
+|---|---|---|
+| before | 33.5 MIPS | 408.7 MIPS |
+| `fetch` always inlined | **36.6 MIPS** (+9%; the build without JIT call: 36.2) | 414.4 MIPS |
+
+`tools/bench.sh` (3 G instructions): interpreter **35.8 MIPS** (was 32.0).
+The lesson from 17.9 holds, with a sharper form: when unrelated code makes
+a hot loop slower, look at what got *inlined*, and compare a profile of
+both builds function by function.
+
 ## 17.10 Step 9: regions, and what compiling really costs
 
 At 137 MIPS a profile showed the dispatcher as a big share again: blocks
@@ -444,6 +473,7 @@ self-decompression; accelerators and idle detection off):
 | registers per guest block, comparisons feed branches (17.13) | | +1.5% (297.4 → 301.6 in one A/B session) |
 | chaining (17.14) | | +17% (301.1 → 352.9 in one A/B session) |
 | flash read directly (17.15) | | +17% (349.6 → 408.7 in one A/B session) |
+| `Board::fetch` always inlined (17.9) | **35.8** | 414 |
 
 (Absolute numbers move by a few percent from one day to the next with
 the machine's state: the old binary gave 297-300 MIPS in the session of
@@ -725,9 +755,10 @@ flash image afterwards.
 `--stats` output (instruction counts, exceptions, devices) is
 byte-identical before and after.
 
-With 17.13-17.15 together the JIT runs the benchmark at ~409 MIPS,
-**~12.8×** the interpreter (32 MIPS), and IOS reaches `Router>` with
-`--idle off` in **30.4 s** (interpreter: 217.8 s).
+With 17.13-17.15 together the JIT runs the benchmark at ~410 MIPS,
+**~11.5×** the interpreter (35.8 MIPS since the inlining fix at the end of
+17.9), and IOS reaches `Router>` with `--idle off` in **30.4 s**
+(interpreter: 217.8 s).
 
 ## 17.16 What limits it, and next steps
 

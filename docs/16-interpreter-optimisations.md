@@ -207,6 +207,10 @@ MIPS. The core alone on flat RAM (`cargo test --release -p ppc8xx --test
 throughput -- --ignored --nocapture`) does ~94 MIPS. The difference is the
 board: address decoding, devices, the device sync every 256 instructions.
 
+(Later, chapter 17.9: once the JIT also called `Board::fetch`, LLVM
+stopped inlining it into this loop, which cost 7%; forcing the inlining
+brought the interpreter to **35.8 MIPS** on the same benchmark.)
+
 For the user:
 
 | | before | after |

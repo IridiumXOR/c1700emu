@@ -696,7 +696,12 @@ impl Platform for Board {
 
     /// Instruction fetch: no watch logging (the watch is for data), so DRAM
     /// and ROM are always the fast path.
-    #[inline]
+    ///
+    /// Always inlined: the interpreter's loop calls it for every
+    /// instruction, and since the JIT calls it too (scanner, checker),
+    /// LLVM stopped inlining it there on its own, which cost the
+    /// interpreter 7% (docs ch. 17.9).
+    #[inline(always)]
     fn fetch(&mut self, addr: u32) -> Result<u32, BusError> {
         match self.region(addr) {
             Region::Dram { bank, base } => Ok(be32(&self.dram[bank as usize], base + (addr & PAGE_MASK))),
