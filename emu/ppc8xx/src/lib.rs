@@ -349,6 +349,9 @@ pub struct Cpu {
     pub exception_counts: [u64; 32],
     /// First addresses that raised Software Emulation (unimplemented instructions).
     pub soft_emulation_pcs: Vec<u32>,
+    /// Where the last traced `sc` returns to (log target `syscall` only),
+    /// to log its result when an `rfi` gets back there.
+    syscall_return: u32,
 }
 
 impl Default for Cpu {
@@ -388,6 +391,7 @@ impl Cpu {
             decoder: DecodeCache::new(),
             exception_counts: [0; 32],
             soft_emulation_pcs: Vec::new(),
+            syscall_return: u32::MAX,
         };
         cpu.hard_reset(true);
         cpu
@@ -688,6 +692,13 @@ impl Cpu {
         }
 
         self.exception_counts[(exc.vector_offset() >> 8) as usize & 31] += 1;
+        // `--log-level syscall=debug`: system calls (on Cisco boxes, the
+        // "EMT" calls into the ROM monitor: number in r3, arguments in r4-r6).
+        if exc == Exception::SystemCall && log::log_enabled!(target: "syscall", log::Level::Debug) {
+            log::debug!(target: "syscall", "sc at {pc:#010x}: r3={:#x} r4={:#x} r5={:#x} r6={:#x} lr={:#010x}",
+                self.gpr[3], self.gpr[4], self.gpr[5], self.gpr[6], self.lr);
+            self.syscall_return = srr0;
+        }
         if exc == Exception::SoftwareEmulation
             && self.soft_emulation_pcs.len() < 32
             && !self.soft_emulation_pcs.contains(&pc)
@@ -707,6 +718,10 @@ impl Cpu {
     pub fn return_from_interrupt(&mut self) {
         self.set_msr((self.msr & !msr::SAVED) | (self.srr1 & msr::SAVED));
         self.pc = self.srr0 & !3;
+        if self.pc == self.syscall_return {
+            self.syscall_return = u32::MAX;
+            log::debug!(target: "syscall", "sc returns r3={:#x} to {:#010x}", self.gpr[3], self.pc);
+        }
     }
 
     /// Write the MSR.

@@ -22,6 +22,7 @@ pub mod board;
 pub mod console;
 pub mod coredump;
 pub mod emulator;
+pub mod fakerom;
 pub mod fastforward;
 pub mod gdb;
 pub mod idle;

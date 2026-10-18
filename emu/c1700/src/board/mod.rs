@@ -531,6 +531,32 @@ impl Board {
         true
     }
 
+    /// Copy `data` to `addr`, but only if the whole range is plain DRAM
+    /// (like `fill_dram`); otherwise change nothing and return false. Used
+    /// by the built-in boot ROM to load an image (docs ch. 24).
+    pub fn load_dram(&mut self, addr: u32, data: &[u8]) -> bool {
+        let Some(end) = addr.checked_add(data.len() as u32) else { return false };
+        let mut chunks = Vec::new();
+        let mut a = addr;
+        while a < end {
+            let n = (PAGE_SIZE - (a & PAGE_MASK)).min(end - a);
+            match self.region(a) {
+                Region::Dram { bank, base } => chunks.push((bank as usize, (base + (a & PAGE_MASK)) as usize, n as usize)),
+                _ => return false,
+            }
+            a += n;
+        }
+        let mut src = 0;
+        for (bank, off, n) in chunks {
+            let first = bank as u32 * DRAM_PAGES + (off >> 12) as u32;
+            let last = bank as u32 * DRAM_PAGES + ((off + n - 1) >> 12) as u32;
+            self.code.note_pages(first, last);
+            self.dram[bank][off..off + n].copy_from_slice(&data[src..src + n]);
+            src += n;
+        }
+        true
+    }
+
     pub fn poke8(&mut self, addr: u32, value: u8) -> bool {
         match self.region(addr) {
             Region::Dram { bank, base } => {

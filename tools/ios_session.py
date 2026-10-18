@@ -10,7 +10,8 @@ prompt (pass --restore); otherwise the image is fetched with `tftpdnld -r`
 (the emulator needs --tftp-root).
 CMDFILE has one IOS command per line (default: show version/interfaces/
 diag/flash:). Directives: "wait TEXT" waits up to 60 s for TEXT,
-"sleep N" lets N seconds pass, "profile-reset" sends Ctrl-] p (restart
+"send TEXT" types a line without waiting for a prompt (plain "send"
+presses RETURN, e.g. at a [confirm]), "sleep N" lets N seconds pass, "profile-reset" sends Ctrl-] p (restart
 the --profile counters), "snapshot" sends Ctrl-] s and waits until the
 snapshot is saved (--snapshot FILE), "core" sends Ctrl-] d (ELF core dump,
 --core FILE), "host CMD" runs CMD on the host and logs its output (e.g. a
@@ -103,6 +104,12 @@ if r in ("Router>", "Router#"):
         if c.startswith("wait "):
             # also look at what the previous command already printed
             mark(f"waiting for {c[5:]!r}: {wait_for(c[5:], limit=60, since=last_cmd)!r}")
+            continue
+        if c == "send" or c.startswith("send "):
+            # type a line without waiting for a prompt (e.g. "send" alone
+            # answers a [confirm]); "wait" then looks from here on
+            last_cmd = len(buf)
+            send(c[5:] + "\r"); mark(f"sent {c[5:]!r}")
             continue
         if c.startswith("sleep "):
             end = time.time() + float(c[6:])
