@@ -1,6 +1,7 @@
 //! The CPM's serial communication controllers in HDLC mode (MPC860UM
-//! chapters 21 and 23; docs ch. 23): what a WIC-1T's serial port runs on.
-//! WIC slot 0's port is SCC1, slot 1's is SCC2 (IOS's `sub_80506AEC`).
+//! chapters 21 and 23; docs ch. 23): what the WICs' serial ports run on.
+//! WIC slot 0's first port is SCC1, slot 1's SCC2; a 2T's second ports
+//! are SCC4 (slot 0) and SCC3 (slot 1) (IOS's `wic_slot_scc_channels`).
 //!
 //! The registers (GSMR, PSMR, TODR, SCCE, SCCM) live in the MPC860 model;
 //! this is the engine, on the board because it needs memory access, like
@@ -115,7 +116,7 @@ impl Board {
         out
     }
 
-    /// The link of SCC n: the serial port of the WIC in slot n (SCC1/SCC2).
+    /// The link of SCC n's serial port.
     fn scc_link(&mut self, n: usize) -> Option<&mut HostLink> {
         self.serial.get_mut(n).and_then(|l| l.as_mut())
     }

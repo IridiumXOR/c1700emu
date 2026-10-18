@@ -63,6 +63,11 @@ Chapter references are to `docs/`.
       instead of up to 626 ms, IOS to `Router>` (--idle off) 18.8 s
       (chapter 17.17).
 
+- [x] 19. Found on the way: the WIC-2T (two ports, SCC1/SCC4 and
+      SCC2/SCC3) and DCE cables (`--serial0 udp:...,dce`); two routers
+      cabled twice with a DCE end each (chapter 23.7,
+      tools/tests/serial_2t_test.sh).
+
 ## IDA and docs
 
 - [x] 14. 0x43a0 is ROMMON's stack, holding a copy of its checksum

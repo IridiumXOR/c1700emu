@@ -76,23 +76,33 @@ struct Args {
     board_id: u8,
 
     /// WAN interface card in WIC slot 0 (docs ch. 23): wic-1t (one serial
-    /// port, IOS's Serial0).
+    /// port) or wic-2t (two). IOS numbers the ports Serial0/0, 0/1... in
+    /// slot order.
     #[arg(long, value_enum)]
     wic0: Option<WicKind>,
 
-    /// WAN interface card in WIC slot 1 (wic-1t: Serial1).
+    /// WAN interface card in WIC slot 1.
     #[arg(long, value_enum)]
     wic1: Option<WicKind>,
 
-    /// Cable the serial port of the WIC in slot 0 to another emulator:
-    /// udp:LPORT:RHOST:RPORT, one HDLC frame per datagram (docs ch. 23).
+    /// Cable the first serial port of the card in slot 0 to another
+    /// emulator: udp:LPORT:RHOST:RPORT, one HDLC frame per datagram, with a
+    /// V.35 DTE cable, or a DCE cable with ",dce" appended (docs ch. 23).
     /// Without it the port has no cable.
     #[arg(long, value_parser = parse_serial)]
-    serial0: Option<(u16, std::net::SocketAddr)>,
+    serial0: Option<SerialSpec>,
 
-    /// The same for the WIC in slot 1.
+    /// The same for the second port of a wic-2t in slot 0.
+    #[arg(long = "serial0-1", value_parser = parse_serial)]
+    serial0_1: Option<SerialSpec>,
+
+    /// The same for the first port of the card in slot 1.
     #[arg(long, value_parser = parse_serial)]
-    serial1: Option<(u16, std::net::SocketAddr)>,
+    serial1: Option<SerialSpec>,
+
+    /// The same for the second port of a wic-2t in slot 1.
+    #[arg(long = "serial1-1", value_parser = parse_serial)]
+    serial1_1: Option<SerialSpec>,
 
     /// Write this configuration register value into NVRAM before booting
     /// (0x8000 = diagnostic messages, 0x2102 = typical IOS default).
@@ -336,11 +346,12 @@ fn main() -> Result<(), String> {
         log::info!("Ethernet port connected to {}", link.what);
         machine.board.net = Some(Link::Host(link));
     }
-    for (slot, spec) in [args.serial0, args.serial1].into_iter().enumerate() {
-        if let Some((port, remote)) = spec {
-            let link = HostLink::udp(port, remote, wakeup.clone()).map_err(|e| e.to_string())?;
-            log::info!("Serial port of WIC slot {slot} connected to {}", link.what);
-            machine.board.connect_serial(slot, link)?;
+    let serials = [(0, 0, args.serial0), (0, 1, args.serial0_1), (1, 0, args.serial1), (1, 1, args.serial1_1)];
+    for (slot, port, spec) in serials {
+        if let Some(SerialSpec { local, remote, dce }) = spec {
+            let link = HostLink::udp(local, remote, wakeup.clone()).map_err(|e| e.to_string())?;
+            log::info!("serial port {port} of WIC slot {slot} connected to {}{}", link.what, if dce { " (DCE)" } else { "" });
+            machine.board.connect_serial(slot, port, link, dce)?;
         }
     }
     machine.set_engine(args.cpu, args.jit_threshold);
@@ -457,10 +468,22 @@ fn parse_net(s: &str) -> Result<NetChoice, String> {
     }
 }
 
-fn parse_serial(s: &str) -> Result<(u16, std::net::SocketAddr), String> {
-    match parse_net(s)? {
-        NetChoice::Udp(port, remote) => Ok((port, remote)),
-        _ => Err("expected udp:LPORT:RHOST:RPORT".into()),
+/// Where a serial port is cabled: a UDP tunnel, DTE or DCE end.
+#[derive(Clone, Copy, Debug)]
+struct SerialSpec {
+    local: u16,
+    remote: std::net::SocketAddr,
+    dce: bool,
+}
+
+fn parse_serial(s: &str) -> Result<SerialSpec, String> {
+    let (link, dce) = match s.strip_suffix(",dce") {
+        Some(link) => (link, true),
+        None => (s, false),
+    };
+    match parse_net(link)? {
+        NetChoice::Udp(local, remote) => Ok(SerialSpec { local, remote, dce }),
+        _ => Err("expected udp:LPORT:RHOST:RPORT[,dce]".into()),
     }
 }
 

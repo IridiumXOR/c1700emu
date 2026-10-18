@@ -114,9 +114,9 @@ pub struct Board {
     code: CodeWatch,
     /// The CPM's SCCs (HDLC engine state, `scc.rs`).
     scc: [scc::SccState; 4],
-    /// What the serial ports of WIC slots 0 and 1 (SCC1, SCC2) are cabled
-    /// to: a UDP tunnel to another emulator (`--serial0`, docs ch. 23).
-    pub serial: [Option<crate::net::host::HostLink>; 2],
+    /// What the serial port on each SCC (`wic::scc_of`) is cabled to: a
+    /// UDP tunnel to another emulator (`--serial0`, docs ch. 23).
+    pub serial: [Option<crate::net::host::HostLink>; 4],
     /// [`Platform::host_page_epoch`]: moves when a flash bank leaves
     /// read-array mode (its pages may have been handed out for direct reads).
     host_epoch: u64,
@@ -175,7 +175,7 @@ impl Board {
             idma_busy: false,
             code: CodeWatch::new(),
             scc: Default::default(),
-            serial: [None, None],
+            serial: [None, None, None, None],
             host_epoch: 0,
         };
         board.update_wic_pins();
@@ -290,37 +290,61 @@ impl Board {
         self.update_irq();
     }
 
-    /// Cable the serial port of the WIC in `slot` (0 or 1: SCC1, SCC2) to
-    /// `link`: a V.35 DTE cable with the modem signals up (docs ch. 23).
-    pub fn connect_serial(&mut self, slot: usize, link: crate::net::host::HostLink) -> Result<(), String> {
-        match self.io.wics.get_mut(slot).and_then(|w| w.as_mut()) {
-            Some(wic) if wic.kind == wic::WicKind::Wic1T => wic.cable = wic::Cable::V35Dte,
-            _ => return Err(format!("--serial{slot}: no serial WIC in slot {slot} (add --wic{slot} wic-1t)")),
+    /// Cable serial port `port` of the WIC in `slot` to `link`: a V.35
+    /// cable, DTE or DCE, with the modem signals up (docs ch. 23).
+    pub fn connect_serial(&mut self, slot: usize, port: usize, link: crate::net::host::HostLink, dce: bool) -> Result<(), String> {
+        let scc = wic::scc_of(slot, port);
+        match (self.io.wics.get_mut(slot).and_then(|w| w.as_mut()), scc) {
+            (Some(card), Some(_)) if port < card.kind.ports() => {
+                card.cables[port] = if dce { wic::Cable::V35Dce } else { wic::Cable::V35Dte };
+            }
+            _ => return Err(format!("no serial port {port} on a card in WIC slot {slot} (--wic{slot} wic-1t or wic-2t)")),
         }
-        self.serial[slot] = Some(link);
+        self.serial[scc.unwrap()] = Some(link);
         self.update_wic_pins();
         Ok(())
     }
 
     /// Drive the MPC860 port pins the serial WICs' modem signals reach
-    /// (IOS's `sub_8050D4D4`, `D5D8`, `D918`; DTE wiring): DCD, CTS and DSR,
-    /// active low, asserted while a cable is connected; and the transmit
-    /// and receive clock pins, which toggle then (`show controllers`
-    /// samples them: "TX and RX clocks detected").
+    /// (IOS's `serial_dcd`, `serial_dsr`, `serial_cts`). With a DTE cable
+    /// DCD, CTS and DSR come in on port C/B pins, and the transmit and
+    /// receive clock pins toggle (`show controllers` samples them: "TX and
+    /// RX clocks detected"). With a DCE cable (or none: the cable ID then
+    /// says DCE) IOS reads DCD/DSR and CTS on the pins a DTE drives as DTR
+    /// and RTS, and makes the clock itself. All active low: asserted
+    /// while a cable is connected.
     fn update_wic_pins(&mut self) {
-        // Per port: (port C DCD | CTS, port B DSR, port A clocks).
-        const PINS: [(u16, u32, u16); 2] = [(0x0020 | 0x0010, 0x0080, 0x0800 | 0x0100), (0x0080 | 0x0040, 0x0020, 0x0200 | 0x0400)];
+        // Per SCC: DTE (port C DCD | CTS, port B DSR, port A clocks) and
+        // DCE (port C, port B) inputs.
+        const DTE: [(u16, u32, u16); 4] = [
+            (0x0020 | 0x0010, 0x0080, 0x0800 | 0x0100),
+            (0x0080 | 0x0040, 0x0020, 0x0200 | 0x0400),
+            (0x0200 | 0x0100, 0x0010, 0x2000 | 0x4000),
+            (0x0800 | 0x0400, 0x0040, 0x8000 | 0x1000),
+        ];
+        const DCE: [(u16, u32); 4] = [(0, 0x0800 | 0x1000), (0x0008, 0x2000), (0x0004, 0x4000), (0, 0x0400 | 0x8000)];
         let mut pins = crate::mpc860::PortInputs::default();
-        for (slot, &(pc, pb, pa)) in PINS.iter().enumerate() {
-            let Some(wic) = &self.io.wics[slot] else { continue };
-            let cabled = wic.cable != wic::Cable::None;
-            pins.pc_mask |= pc;
-            pins.pb_mask |= pb;
-            if !cabled {
-                pins.pc_value |= pc; // deasserted (high)
-                pins.pb_value |= pb;
-            } else {
-                pins.pa_clocks |= pa;
+        for slot in 0..2 {
+            let Some(card) = &self.io.wics[slot] else { continue };
+            for port in 0..card.kind.ports() {
+                let Some(n) = wic::scc_of(slot, port) else { continue };
+                let cable = card.cables[port];
+                let (pc, pb) = match cable {
+                    wic::Cable::V35Dte => {
+                        pins.pa_clocks |= DTE[n].2;
+                        (DTE[n].0, DTE[n].1)
+                    }
+                    wic::Cable::V35Dce => DCE[n],
+                    // No cable: every input high (deasserted), whichever wiring
+                    // IOS assumes (DTE until it has read the cable ID).
+                    wic::Cable::None => (DTE[n].0 | DCE[n].0, DTE[n].1 | DCE[n].1),
+                };
+                pins.pc_mask |= pc;
+                pins.pb_mask |= pb;
+                if cable == wic::Cable::None {
+                    pins.pc_value |= pc;
+                    pins.pb_value |= pb;
+                }
             }
         }
         self.mpc.pins = pins;

@@ -185,8 +185,35 @@ different keepalive periods (10 and 7 s), as real ones may.
   and `--stats` counts the frames: `SCC1 (HDLC, UDP 31795 ->
   127.0.0.1:31796): 34 frames sent, 34 received`.
 
-Not modelled: DCE cables (IOS reads the modem signals from other pins
-then), line speed (frames go out instantly; `clock rate` changes
-nothing), the 2T (a second port at +0x14/+0x18 on SCC4/SCC3), and the
-cable-change interrupt (the cabling is fixed when the emulator starts).
-Snapshots save the SCC and card state (format 3).
+Not modelled: the cable-change interrupt (the cabling is fixed when the
+emulator starts). Snapshots save the SCC and card state (format 3).
+
+## 23.7 The WIC-2T and DCE cables
+
+Two more pieces fell out of the same IOS functions:
+
+* **The WIC-2T** (card type 0x12, "Serial 2T (12in1)"): two ports. The
+  second port's registers are at +0x14/+0x18 of the window, and
+  `wic_slot_scc_channels` gives two-port cards SCC channels [0, 3] in slot
+  0 and [1, 2] in slot 1: slot 0's second port is **SCC4**, slot 1's
+  **SCC3**. IOS numbers the ports Serial0/0, Serial0/1... in slot order.
+  The modem pins of channels 2 and 3 are in the same functions.
+* **DCE cables**: the cable ID's bit 0. IOS then reads DCD/DSR and CTS on
+  the pins a DTE drives as DTR and RTS (port 0: PBDAT 0x800 and 0x1000),
+  drives the clock itself, and `show controllers` prints the clock rate
+  instead of sampling clock pins. An uncabled port drives both sets of
+  inputs high: IOS assumes DTE wiring until it has read the cable ID (the
+  first version left the DTE pins at 0 and an unconnected 2T port came up
+  for a moment).
+
+```
+c1700emu ... --wic0 wic-2t --serial0 udp:33000:127.0.0.1:33001,dce --serial0-1 udp:33002:127.0.0.1:33003
+```
+
+`tools/tests/serial_2t_test.sh` cables two routers twice, a DCE end on
+each side (with `clock rate 64000`): both lines up, pings on both, and
+
+```
+Router# show controllers serial 0/0        Router# show controllers serial 0/1
+DCE V.35, clock rate 64000                 DTE V.35 TX and RX clocks detected.
+```

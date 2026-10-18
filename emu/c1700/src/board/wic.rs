@@ -38,6 +38,10 @@ pub enum WicKind {
     /// Serial (1T)", served by the CPM's SCC1 (slot 0) or SCC2 (slot 1).
     #[value(name = "wic-1t")]
     Wic1T,
+    /// Two synchronous serial ports (card type 0x12): "WAN Interface Card -
+    /// Serial 2T", on SCC1 and SCC4 (slot 0) or SCC2 and SCC3 (slot 1).
+    #[value(name = "wic-2t")]
+    Wic2T,
 }
 
 impl WicKind {
@@ -45,7 +49,37 @@ impl WicKind {
     pub fn card_type(self) -> u8 {
         match self {
             WicKind::Wic1T => 0x02,
+            WicKind::Wic2T => 0x12,
         }
+    }
+
+    /// Serial ports on the card.
+    pub fn ports(self) -> usize {
+        match self {
+            WicKind::Wic1T => 1,
+            WicKind::Wic2T => 2,
+        }
+    }
+
+    /// The assembly part number in the EEPROM (73-NNNN-RR).
+    fn part_number(self) -> (u16, u8) {
+        match self {
+            WicKind::Wic1T => (2834, 7),
+            WicKind::Wic2T => (4115, 3),
+        }
+    }
+}
+
+/// The SCC (0-3) serving port `port` of a serial card in `slot` (IOS's
+/// `wic_slot_scc_channels`): one-port cards slot 0 -> SCC1, slot 1 ->
+/// SCC2; the second ports slot 0 -> SCC4, slot 1 -> SCC3.
+pub fn scc_of(slot: usize, port: usize) -> Option<usize> {
+    match (slot, port) {
+        (0, 0) => Some(0),
+        (1, 0) => Some(1),
+        (1, 1) => Some(2),
+        (0, 1) => Some(3),
+        _ => None,
     }
 }
 
@@ -55,14 +89,17 @@ pub enum Cable {
     None,
     /// A V.35 DTE cable (the other end provides the clock).
     V35Dte,
+    /// A V.35 DCE cable: this end provides the clock (`clock rate`).
+    V35Dce,
 }
 
 impl Cable {
-    /// The 4-bit cable ID the card reports.
+    /// The 4-bit cable ID the card reports (bit 0: DCE).
     fn id(self) -> u8 {
         match self {
             Cable::None => 0x01,
             Cable::V35Dte => 0x04,
+            Cable::V35Dce => 0x05,
         }
     }
 }
@@ -71,7 +108,8 @@ impl Cable {
 pub struct Wic {
     pub kind: WicKind,
     eeprom: [u8; 128],
-    pub cable: Cable,
+    /// Per serial port.
+    pub cables: [Cable; 2],
     /// The window registers software writes (latches).
     regs: [u8; 0x20],
 }
@@ -83,27 +121,29 @@ impl Wic {
         e[1] = kind.card_type();
         e[2..4].copy_from_slice(&[1, 0]); // hardware revision 1.0
         e[4..8].copy_from_slice(&(20_041_000 + slot as u32).to_be_bytes()); // serial number
-        e[8] = 73; // part number 73-2834-07, the WIC-1T assembly
-        e[9..11].copy_from_slice(&2834u16.to_be_bytes());
-        e[11] = 7;
+        let (part, rev) = kind.part_number();
+        e[8] = 73; // assembly part number 73-NNNN-RR
+        e[9..11].copy_from_slice(&part.to_be_bytes());
+        e[11] = rev;
         e[12] = 0x00; // test history
         e[13..16].copy_from_slice(&[0, 0, 0]); // RMA number
         e[16] = 0x50; // board revision A0
         e[23] = 0x01; // connector type: WAN module
-        Wic { kind, eeprom: e, cable: Cable::None, regs: [0; 0x20] }
+        Wic { kind, eeprom: e, cables: [Cable::None; 2], regs: [0; 0x20] }
     }
 
     /// A read in the card's slot window.
     pub fn read8(&self, off: u32) -> u8 {
         let off = off as usize & 0xFFFF;
         match off {
-            // Cable-ID mux: the pin selected by bits 0-1, in bit 0x20.
-            4 => {
-                let latch = self.regs[4];
-                let pin = (self.cable.id() >> (latch & 3)) & 1;
+            // Cable-ID mux (port 0 at +4, port 1 at +0x14): the pin selected
+            // by bits 0-1, in bit 0x20.
+            0x04 | 0x14 if (off == 0x04 || self.kind.ports() > 1) => {
+                let latch = self.regs[off];
+                let pin = (self.cables[off / 0x10].id() >> (latch & 3)) & 1;
                 latch & !0x20 | pin << 5
             }
-            8 => self.regs[8] & !1, // no cable change to report
+            0x08 | 0x18 => self.regs[off] & !1, // no cable change to report
             // Offset 0 is the voice-card presence test (0x05 -> 0x0A): a data
             // card has no logic there and the bus floats.
             _ => 0xFF,
@@ -167,8 +207,10 @@ mod tests {
             })
         };
         assert_eq!(read_id(&mut wic), 0x01, "no cable");
-        wic.cable = Cable::V35Dte;
+        wic.cables[0] = Cable::V35Dte;
         assert_eq!(read_id(&mut wic), 0x04, "V.35 DTE");
+        wic.cables[0] = Cable::V35Dce;
+        assert_eq!(read_id(&mut wic), 0x05, "V.35 DCE");
         assert_eq!(wic.read8(0), 0xFF, "no voice logic at offset 0");
     }
 

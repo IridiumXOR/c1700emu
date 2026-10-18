@@ -37,8 +37,8 @@ use the ROMMON `confreg` command; changes persist in `c1700-nvram.bin`).
 | `--no-fast-forward` | execute the ROM's delay loops instead of skipping them |
 | `--net virtual\|none\|tap:NAME\|udp:LPORT:RHOST:RPORT` | what the Ethernet port is plugged into (chapter 18; creating a TAP device and bridging it: 18.2) |
 | `--mac XX:XX:XX:XX:XX:XX` | MAC address written into the NVRAM cookie |
-| `--wic0 wic-1t`, `--wic1 wic-1t` | fit a WIC-1T serial card in WIC slot 0 or 1 (IOS's Serial0/0, Serial0/1; chapter 23) |
-| `--serial0 udp:LPORT:RHOST:RPORT`, `--serial1 ...` | cable that card's serial port to another emulator (one HDLC frame per datagram); without it: no cable |
+| `--wic0 wic-1t\|wic-2t`, `--wic1 ...` | fit a serial card in WIC slot 0 or 1 (ports numbered Serial0/0, 0/1... in slot order; chapter 23) |
+| `--serial0 udp:LPORT:RHOST:RPORT[,dce]`, `--serial0-1`, `--serial1`, `--serial1-1` | cable the first (second) serial port of the card in slot 0 (1) to another emulator, one HDLC frame per datagram; a V.35 DTE cable, or DCE with `,dce`; without it: no cable |
 | `--restore FILE` | start from a snapshot instead of power-on (chapter 20) |
 | `--snapshot FILE` / `--core FILE` | where `Ctrl-] s` saves a snapshot and `Ctrl-] d` an ELF core dump (defaults `c1700.snap`, `c1700-core.elf`) |
 | `--cpu interp\|jit` | CPU engine: the interpreter (default, the reference) or the JIT (chapter 17) |
