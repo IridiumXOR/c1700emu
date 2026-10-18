@@ -4,9 +4,10 @@
 //!
 //! Memory is watched per 4-byte **word** inside 4 KB pages: exactly the
 //! instruction words that were translated. Code and data can be neighbours:
-//! during IOS's boot a halfword variable at physical 0x43a4 is written over
-//! and over, and translated code starts at 0x43a8 (docs ch. 17.10). Watching
-//! whole pages, or even 32-byte lines, threw that code away on every write.
+//! ROMMON copies its checksum routine onto its stack and runs it there, so
+//! the stack frame next to that code is written all the time (docs ch. 17.10,
+//! 22). Watching whole pages, or even 32-byte lines, threw code away on every
+//! one of those writes.
 //!
 //! The platform decides what a page number means (it must be the same for
 //! every alias of the same memory). It calls [`CodeWatch::note_write`] on

@@ -30,6 +30,7 @@ Start with the **[project summary](00-summary.md)** for a one-page overview.
 | 19 | [Slots, IO FPGA, machine checks](19-slots-iofpga-machine-checks.md) | the WIC/VIC slot windows and their presence test, the IO FPGA registers IOS uses, why every boot takes five machine checks |
 | 20 | [Snapshots and core dumps](20-snapshots-and-core-dumps.md) | `Ctrl-] s` / `--restore`: the whole machine in 0.2 s, IOS at `Router#` in 0.3 s; `Ctrl-] d`: ELF core files for GDB |
 | 21 | [Warp mode and the silent console](21-warp-and-the-silent-console.md) | `--idle warp` back; why the console "died": IOS's exec-timeout logout, found with snapshot-based experiments |
+| 22 | [ROMMON runs code from its stack](22-rommon-code-on-the-stack.md) | the "variable next to code" the JIT tripped over: ROMMON copies its checksum loop onto the stack to run it from RAM; traced with core dumps, `--watch` on the RAM alias, IDA |
 
 Reference material:
 

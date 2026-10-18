@@ -398,9 +398,10 @@ benchmark barely moved: **compiling** now took 12 of 21 seconds.
    (`enable_verifier`): off, 12 → 7.7 s.
 2. 70% of the translations were thrown away by code writes, all on one
    physical page, 0x4000. With the `--watch` tool and a backtrace on the
-   first hits: a halfword variable at 0x43a4 is written over and over
-   during IOS's boot, and translated code starts at 0x43a8, **four bytes
-   later**. Watching whole pages, then 32-byte lines, kept throwing that
+   first hits: a halfword at 0x43a4 is written over and over during the
+   boot, and translated code starts at 0x43a8, **four bytes later**.
+   (It turned out to be ROMMON copying its checksum routine onto its stack
+   before running it: chapter 22.) Watching whole pages, then 32-byte lines, kept throwing that
    code away. Now the platform watches exactly the translated instruction
    words; the JIT indexes its regions by 32-byte lines. Invalidations:
    2476 → 10.

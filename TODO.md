@@ -41,8 +41,8 @@ Chapter references are to `docs/`.
 
 ## IDA and docs
 
-- [ ] 14. Identify and annotate the low-memory structure at physical 0x43a0
-      (a halfword variable right before code) and the ROM routines at
-      0xFFF23C34 / 0xFFF23C88.
+- [x] 14. 0x43a0 is ROMMON's stack, holding a copy of its checksum
+      routine it runs from RAM; ROM routines named (bootdev_checksum,
+      bootdev_range, bootdev_read, copy16, cache maintenance), chapter 22.
 - [x] 15. Chapter 17's worked example also shows the loop as a region
       (jump table, step counter, budget check).

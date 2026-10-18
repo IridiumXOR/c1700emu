@@ -166,6 +166,22 @@ FUNCS = [
     (0xFFF03904, "exc_Decrementer", None, "stage 1: stash SRR0/1 in SPRG2/3, rfi to stage 2 (0xFFF03948)"),
     (0xFFF0338C, "exc_Syscall", None, None),
     (0xFFF03A38, "exc_Unexpected", None, "shared by every vector without a dedicated handler"),
+    # ---- found while chasing JIT code invalidations (docs ch. 17.10, 22) ----
+    (0xFFF21C44, "checksum16_oc", "int __fastcall checksum16_oc(int sum, unsigned short *buf, int len);",
+     "16-bit ones'-complement checksum (end-around carry). bootdev_checksum copies it onto its stack (0x800043A4 during boot) and runs it from RAM"),
+    (0xFFF23C34, "bootdev_range", "unsigned int __fastcall bootdev_range(int dev, int offset, int len, unsigned int *addr);",
+     "Device table at 0x800079BC (32-byte entries: +8 base, +16 limit, +20 flags): *addr = base+offset, length clipped to the limit"),
+    (0xFFF23C88, "bootdev_read", "int __fastcall bootdev_read(int dev, int offset, void *buf, int len);",
+     "Read through bootdev_range: copy with *0x8000791C (memcpy-like), or a special routine when entry flag 0x40000000 is set"),
+    (0xFFF21C78, "bootdev_checksum", "int __fastcall bootdev_checksum(int dev, int offset, int len);",
+     "Ones'-complement checksum of a boot device range (flash files, the IOS image before booting it). For len > 64 KB it "
+     "copies checksum16_oc (52 bytes) into a local array on its stack (copy16), syncs the caches and runs it from RAM, "
+     "much faster than from the 8-bit boot ROM: the 'code next to data' at 0x800043A4 the JIT had to cope with (docs ch. 22)"),
+    (0xFFF08C80, "copy16", "void __fastcall copy16(const void *src, void *dst, int len);", "copy by halfwords"),
+    (0xFFF16AE0, "sync_caches_for_code", "void sync_caches_for_code(void);",
+     "dcache_flush_all + icache_invalidate_all: what real hardware needs before running freshly written code"),
+    (0xFFF03F40, "dcache_flush_all", "void dcache_flush_all(void);", "sync, then flush every D-cache line through DC_CST/DC_ADR"),
+    (0xFFF03EB8, "icache_invalidate_all", "void icache_invalidate_all(void);", "IC_CST = invalidate all (0x0C << 24), isync"),
 ]
 
 for ea, name, proto, cmt in FUNCS:
@@ -188,6 +204,8 @@ GLOBALS = [
     (0xFFF2EE8C, "p_nvram_base", "unsigned char *p_nvram_base;", "= 0x68000000"),
     (0x80005000, "g_reset_type", "int g_reset_type;", "argument of rom_init_main"),
     (0x800058C8, "g_cookie_loaded", "int g_cookie_loaded;", None),
+    (0x800079BC, "bootdev_table", None, "boot device table, 32-byte entries (bootdev_range): +8 base, +16 limit, +20 flags"),
+    (0x8000791C, "p_bootdev_copy", None, "copy routine used by bootdev_read"),
     (0x800058CC, "g_nvram_was_protected", "int g_nvram_was_protected;", None),
     (0x80005B6C, "g_pit_ticks", "unsigned int g_pit_ticks;", "incremented every PIT period (4.03 ms); ROMMON network timeouts use it"),
     (0x80006464, "g_platform_code", "int g_platform_code;", "51 (0x33) if cookie processor == 0x33 else 101; must equal ELF e_machine of boot images"),
