@@ -162,7 +162,7 @@ struct Args {
     idle_pc: c1700emu::idle::AnchorChoice,
 
     /// Idle detection: realtime (skip idle time, sleep so the router keeps
-    /// the wall clock) or off.
+    /// the wall clock), warp (skip idle time freely) or off.
     #[arg(long, value_enum, default_value = "realtime")]
     idle: c1700emu::idle::IdleMode,
 
