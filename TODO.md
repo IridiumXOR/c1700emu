@@ -94,3 +94,11 @@ Chapter references are to `docs/`.
       its 26 privileged commands, the diagnostic `menu`, `MONRC`; IOS
       `service internal` diff and never-listed keywords (chapter 25,
       tools/rommon_session.py, tools/ios_hidden_commands.py).
+- [x] 24. Built-in boot ROM (`--rom builtin`): IOS boots without Cisco's
+      ROM; entry state and EMT calls measured and implemented (unknown ones
+      warn), reload, monitor variables in NVRAM; `--log-level
+      syscall=debug`; 24.7 s sooner to `Router>` in realtime mode (chapter
+      24, tools/tests/fakerom_test.sh, c1700/tests/fakerom.rs).
+- [ ] 25. Built-in ROM, next: a monitor prompt (`boot`, `confreg`, the BOOT
+      variable / `boot system`, `tftpdnld`), EMT 3/20 (blocking getchar),
+      other IOS images.

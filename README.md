@@ -77,6 +77,10 @@ Cisco's software is not part of this repository. You need:
 * **The boot ROM**: a 512 KB dump of the C1700's boot EPROM (an AT27C040)
   containing System Bootstrap 12.2(1r)XE1. By default the emulator looks
   for `roms/CISCO_bootrom_AT27C040.bin`; `--rom FILE` points elsewhere.
+  Without a ROM dump, **`--rom builtin`** uses the emulator's own minimal
+  boot ROM: it boots the first image in flash straight into IOS (there is
+  no ROMMON prompt then); see
+  [`docs/24-fake-boot-rom.md`](docs/24-fake-boot-rom.md).
 * **An IOS image** for the 1700 series, to go further than ROMMON. The one
   tested end to end is `c1700-adventerprisek9-mz.124-8.bin` (IOS 12.4(8),
   21 MB), which needs a voice-capable chassis (`--model 1760`, or 1750/1751)
@@ -319,7 +323,8 @@ Serial0/0 is up, line protocol is up
   statistics.
 * **Logs**: `--log FILE --log-level info` (or `debug`, with targets such as
   `--log-level warn,net=debug,scc=debug`); each line carries wall-clock
-  time.
+  time. `--log-level warn,syscall=debug` logs every call IOS makes into the
+  ROM monitor (EMT calls) and its answer.
 * **Watching memory**: `--watch 07040000:4000` logs every access to that
   physical range with the PC that made it.
 * **Profiles**: `--profile` (hot ROM addresses, and PC samples of the whole
@@ -353,6 +358,7 @@ IOS sessions):
 | script | what it checks |
 |---|---|
 | `tools/tests/startup_config_test.sh` | IOS boots a fresh NVRAM into `tools/examples/router.cfg` (via a `--config` file) |
+| `tools/tests/fakerom_test.sh` | IOS with `--rom builtin`: `show version`, ping, `write memory`, reload, cold restart |
 | `tools/tests/serial_test.sh` | two routers with WIC-1Ts: line protocol up, pings both ways |
 | `tools/tests/serial_2t_test.sh` | two routers with WIC-2Ts cabled twice, with DCE ends |
 | `tools/tests/tap_test.sh SNAPSHOT` | a TAP device in an unprivileged network namespace: router ↔ host pings |
@@ -373,7 +379,7 @@ The most used options (all of them: `c1700emu --help`, and
 
 | option | default | meaning |
 |---|---|---|
-| `--rom FILE` | `roms/CISCO_bootrom_AT27C040.bin` | boot ROM image |
+| `--rom FILE\|builtin` | `roms/CISCO_bootrom_AT27C040.bin` | boot ROM image, or `builtin` for the emulator's own (no ROMMON) |
 | `--model M` | `1720` | 1720, 1721, 1750, 1751 or 1760 |
 | `--ram MB` | `32` | main memory (up to 256) |
 | `--nvram FILE`, `--flash FILE` | `c1700-nvram.bin`, `c1700-flash.bin` | persistent NVRAM and flash |
