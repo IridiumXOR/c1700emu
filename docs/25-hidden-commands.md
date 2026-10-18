@@ -129,6 +129,8 @@ writes them):
   (0xFFF070E0) runs it as a command line before the first prompt.
   Verified: `MONRC="meminfo"`, `sync`, `reset`, and the memory summary
   appears by itself after the banner.
+  The emulator can set it from outside: `--rommon-var MONRC=meminfo`
+  (chapter 7) gives the same at the very first power-on.
 * **Aliases**: `r=repeat h=history ?=help b=boot ls=dir i=reset k=stack`
   are built in; `alias mi=meminfo` adds one (kept across resets).
 * The `tftpdnld` variables (`IP_ADDRESS`, `IP_SUBNET_MASK`,
