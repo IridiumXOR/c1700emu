@@ -32,6 +32,9 @@
 pub enum IdleMode {
     /// No idle detection.
     Off,
+    /// Skip idle time with no wall-clock limit: virtual time races ahead
+    /// while the router is idle (docs ch. 15.5, 21).
+    Warp,
     /// Skip idle time, but never let virtual time run ahead of the wall
     /// clock: an idle router sleeps on the host and keeps real time.
     ///

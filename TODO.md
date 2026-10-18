@@ -7,8 +7,8 @@ Chapter references are to `docs/`.
 
 - [x] 1. Network bridge: `--net tap:NAME` and `--net udp:...`, `--mac`
       (chapter 18). Two emulated routers ping each other over UDP.
-  - [ ] 1a. Try TAP on a real host network (needs `sudo ip tuntap add`,
-        chapter 18.2); only the UDP path is tested so far.
+  - [x] 1a. TAP tested end to end (pings both ways), without sudo, in a
+        user + network namespace: `tools/tests/tap_test.sh` (chapter 18.4).
 - [x] 2. WIC/VIC slots understood and modelled as empty slots (chapter 19.1).
   - [ ] 2a. Emulate a real card, e.g. WIC-1T: ID EEPROM contents over SPI
         plus the CPM SCC in HDLC mode (serial interfaces).

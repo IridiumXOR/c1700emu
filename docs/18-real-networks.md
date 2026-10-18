@@ -200,5 +200,23 @@ are the routers' own keepalives and CDP announcements.
 * `net::host::tests::udp_tunnel_carries_frames_both_ways`: two UDP link
   ends on localhost exchange a 60-byte and a 42-byte frame.
 * The two-router session above, driven by `tools/ios_session.py`.
-* TAP needs root to create the device, so it is tested by hand with the
-  commands of 18.2.
+* `tools/tests/tap_test.sh SNAPSHOT`: the router on a TAP device, end to
+  end, **without sudo**. An unprivileged user + network namespace
+  (`unshare -r -n`) makes the script root inside a private network stack,
+  where it may create `tap0`; the emulator runs in there too, restored
+  from a snapshot of IOS at the prompt (chapter 20). IOS pings the host
+  side of the TAP device and the host pings the router
+  (`tools/ios_session.py`'s `host` directive):
+
+  ```
+  Router# ping 192.168.100.1
+  Success rate is 80 percent (4/5), round-trip min/avg/max = 1/1/1 ms
+  [host] $ ping -c 3 -W 2 192.168.100.2
+  64 bytes from 192.168.100.2: icmp_seq=1 ttl=255 time=0.685 ms
+  3 packets transmitted, 3 received, 0% packet loss
+  Router# show arp
+  Internet  192.168.100.1           0   86c2.dadf.64a7  ARPA   FastEthernet0/0
+  ```
+
+  The same trick is handy for experiments: `unshare -r -n` gives a
+  throw-away network with TAP devices, bridges and NAT, no root needed.

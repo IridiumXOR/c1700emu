@@ -13,7 +13,8 @@ diag/flash:). Directives: "wait TEXT" waits up to 60 s for TEXT,
 "sleep N" lets N seconds pass, "profile-reset" sends Ctrl-] p (restart
 the --profile counters), "snapshot" sends Ctrl-] s and waits until the
 snapshot is saved (--snapshot FILE), "core" sends Ctrl-] d (ELF core dump,
---core FILE).
+--core FILE), "host CMD" runs CMD on the host and logs its output (e.g. a
+ping to the router over a TAP device).
 LOG gets the console; LOG.stderr the emulator's stderr (stats).
 Environment: LIMIT = overall deadline in seconds (default 1500).
 """
@@ -106,6 +107,11 @@ if r in ("Router>", "Router#"):
             continue
         if c == "profile-reset":
             send("\x1dp"); mark("profile counters reset (Ctrl-] p)")
+            continue
+        if c.startswith("host "):
+            r = subprocess.run(c[5:], shell=True, capture_output=True, text=True, timeout=120)
+            log.write(f"\n[host] $ {c[5:]}\n{r.stdout}{r.stderr}")
+            mark(f"host command exit {r.returncode}")
             continue
         if c in ("snapshot", "core"):
             send("\x1ds" if c == "snapshot" else "\x1dd")

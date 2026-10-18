@@ -1,0 +1,14 @@
+# Router side of tools/tests/tap_test.sh: give FastEthernet0/0 an address on
+# the TAP network, ping the host, let the host ping back.
+enable
+terminal length 0
+configure terminal
+interface FastEthernet0/0
+ip address 192.168.100.2 255.255.255.0
+no shutdown
+end
+sleep 3
+ping 192.168.100.1
+wait Success rate
+host ping -c 3 -W 2 192.168.100.2
+show arp
