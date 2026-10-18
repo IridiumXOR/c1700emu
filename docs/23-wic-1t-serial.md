@@ -186,7 +186,11 @@ different keepalive periods (10 and 7 s), as real ones may.
   127.0.0.1:31796): 34 frames sent, 34 received`.
 
 Not modelled: the cable-change interrupt (the cabling is fixed when the
-emulator starts). Snapshots save the SCC and card state (format 3).
+emulator starts), and the line speed: frames go out as soon as they are
+ready, whatever `clock rate` says. Pacing them would need the DCE end's
+baud-rate generator (SICR, BRGC, SCCR) and, on the DTE end, a clock the
+UDP tunnel doesn't carry; Dynamips doesn't pace its serial links either.
+Snapshots save the SCC and card state (format 3).
 
 ## 23.7 The WIC-2T and DCE cables
 
